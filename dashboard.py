@@ -170,4 +170,4 @@ if start_scan:
 # Acest tab se va popula automat când rulează scanarea, dar punem un mesaj default
 if not start_scan:
     with tab_results:
-        st.info("Apasă 'Lansează Scanarea' pentru a vedea rezultatele aici.")
+        st.info("Apasă 'Lansează Scanarea' pentru a vedea rezultatele aici.!")
