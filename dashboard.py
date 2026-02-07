@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import os
+import requests
 from core.models import Target, TargetType
 from modules.recon_nmap import NmapScanner
 from modules.web_sql import SQLMapScanner
@@ -54,14 +55,14 @@ with st.sidebar:
 # ==========================================
 
 # Creăm tab-urile
-tab_config, tab_results = st.tabs(["🛠️ Configurare Tool-uri", "📊 Rezultate Scanare"])
+tab_config, tab_results, tab_agents = st.tabs(["🛠️ Configurare", "📊 Rezultate", "🖥️ Agenți (C2)"])
 
 # --- TAB 1: CONFIGURARE ---
 with tab_config:
     st.info(f"Configurare activă pentru vectorul: **{scan_type.upper()}**")
     
   # --- NMAP CONFIG ---
-    with st.expander("🌐 1. Nmap (Port Scanning)", expanded=True):
+    with st.expander("🌐 1. Nmap (Port Scanning)", expanded=False):
         col1, col2 = st.columns(2)
         with col1:
             nmap_enabled = st.checkbox("Activează Nmap", value=True)
@@ -85,6 +86,40 @@ with tab_config:
 
     st.markdown("---")
     start_scan = st.button("🚀 LANSEAZĂ SCANAREA COMPLETĂ", type="primary", use_container_width=True)
+        
+
+        
+    # --- TAB-UL NOU: AGENTS ---
+    with tab_agents:
+        st.header("📡 Command & Control Center")
+        
+        if st.button("🔄 Refresh Agents List"):
+            try:
+                # Cerem lista de la API-ul nostru local
+                response = requests.get("http://127.0.0.1:8000/agents/list")
+                if response.status_code == 200:
+                    agents = response.json()
+                    
+                    if agents:
+                        st.success(f"Connectat: {len(agents)} agenți online.")
+                        
+                        # Creăm un tabel frumos
+                        agent_data = []
+                        for name, details in agents.items():
+                            agent_data.append({
+                                "Hostname": name,
+                                "OS": details['os'],
+                                "IP": details['ip'],
+                                "Last Seen": details['last_seen'],
+                                "Status": "🟢 ONLINE"
+                            })
+                        st.table(agent_data)
+                    else:
+                        st.warning("Niciun agent conectat. Rulează 'python agent.py' pe țintă.")
+                else:
+                    st.error("Eroare la comunicarea cu serverul C2.")
+            except Exception as e:
+                st.error(f"Serverul API nu răspunde! Rulează 'uvicorn server_api:app ...'. Eroare: {e}")
 
 # --- LOGICA DE SCANARE ---
 if start_scan:
