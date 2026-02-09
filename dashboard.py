@@ -30,7 +30,7 @@ with st.sidebar:
     st.header("🎯 Țintă & Vector")
     
     # Input Global
-    target_input = st.text_input("Adresă IP / URL", value="scanme.nmap.org", help="Ex: 192.168.1.1 sau example.com")
+    target_input = st.text_input("Adresă IP / URL", value="", help="Ex: 192.168.1.1 sau example.com")
     
     # Selectare Vector (Profil)
     scan_type = st.selectbox(
@@ -55,7 +55,7 @@ with st.sidebar:
 # ==========================================
 
 # Creăm tab-urile
-tab_config, tab_results, tab_agents = st.tabs(["🛠️ Configurare", "📊 Rezultate", "🖥️ Agenți (C2)"])
+tab_config, tab_results, tab_agents = st.tabs(["🛠️ Configurare", "🖥️ Agenți (C2)", "📊 Rezultate" ])
 
 # --- TAB 1: CONFIGURARE ---
 with tab_config:
