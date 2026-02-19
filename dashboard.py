@@ -41,7 +41,8 @@ st.title("🛡️ OWASP & Multi-Vector Scanner")
 # ==========================================
 with st.sidebar:
     st.header("🎯 Țintă & Vector")
-    target_input = st.text_input("Adresă (URL/IP)", value="http://testphp.vulnweb.com")
+    # Setăm ca valoare implicită URL-ul nostru de test perfect
+    target_input = st.text_input("Adresă (URL/IP)", value="http://testphp.vulnweb.com/artists.php?artist=1")
     scan_type = st.selectbox("Vector", options=[t.value for t in TargetType], index=0)
     
     st.markdown("---")
@@ -53,9 +54,9 @@ with st.sidebar:
     else:
         st.error("🔴 Metasploit RPC: OFFLINE")
         if st.button("🔌 Pornește Metasploit (msfrpcd)", use_container_width=True):
-            with st.spinner("Pornesc serverul MSF... (~10 secunde)"):
+            with st.spinner("Pornesc serverul MSF... (poate dura până la 20 secunde)"):
                 if start_msfrpcd():
-                    time.sleep(8)
+                    time.sleep(20) # Așteptăm suficient pentru ca Ruby să încarce framework-ul
                     st.rerun()
                 else:
                     st.error("Eroare: Comanda 'msfrpcd' nu a fost găsită.")
@@ -64,7 +65,8 @@ with st.sidebar:
     if st.button("💀 KILL ALL SCANNERS", type="primary", use_container_width=True):
         os.system("pkill -9 nmap")
         os.system("pkill -9 sqlmap")
-        st.toast("Procesele oprite forțat!", icon="🛑")
+        st.toast("Procesele de scanare (Nmap/SQLMap) oprite forțat!", icon="🛑")
+
 
 # ==========================================
 # MAIN TABS & CONFIG
@@ -99,20 +101,29 @@ with tab_config:
         with col_msf_1:
             msf_enabled = st.checkbox("Activează Metasploit", value=False)
         
-        msf_module_choice = None
+        msf_module_choices = []
         if msf_enabled:
             if not msf_running:
                 st.warning("⚠️ Pornește Serverul Metasploit din stânga mai întâi!")
             else:
                 dynamic_modules = fetch_msf_modules()
-                msf_module_choice = st.selectbox(
-                    f"Selectează Modulul (din {len(dynamic_modules)} disponibile)", 
+                
+                # Încercăm să punem niște selecții default utile
+                defaults = []
+                if "scanner/http/title" in dynamic_modules:
+                    defaults.append("scanner/http/title")
+                if "scanner/http/robots_txt" in dynamic_modules:
+                    defaults.append("scanner/http/robots_txt")
+                if not defaults and dynamic_modules:
+                    defaults = [dynamic_modules[0]]
+
+                msf_module_choices = st.multiselect(
+                    f"Selectează Modulele (din {len(dynamic_modules)} disponibile)", 
                     options=dynamic_modules,
-                    index=dynamic_modules.index("scanner/http/title") if "scanner/http/title" in dynamic_modules else 0
+                    default=defaults
                 )
 
     st.markdown("---")
-    # --- AICI ERA PROBLEMA TA: Butonul lipsea sau era ascuns! ---
     start_scan = st.button("🚀 LANSEAZĂ SCANAREA COMPLETĂ", type="primary", use_container_width=True)
 
 
@@ -128,24 +139,29 @@ if start_scan:
             all_results = []
             current_target = Target(input=target_input, type=scan_type)
 
+            # RULARE NMAP
             if nmap_enabled:
                 with st.spinner("⏳ Rulat Nmap..."):
                     scanner_nmap = NmapScanner()
                     res = scanner_nmap.run(current_target, mode=selected_nmap_mode, use_scripts=use_scripts)
                     all_results.extend(res)
 
+            # RULARE SQLMAP
             if sqlmap_enabled:
                 with st.spinner("⏳ Rulat SQLMap..."):
                     scanner_sql = SQLMapScanner()
                     res = scanner_sql.run(current_target, level=intensity_level, risk=risk_level)
                     all_results.extend(res)
 
-            if msf_enabled and msf_running and msf_module_choice:
-                with st.spinner(f"⏳ Rulat Metasploit ({msf_module_choice})..."):
-                    scanner_msf = MetasploitScanner()
-                    res = scanner_msf.run(current_target, module_type="auxiliary", module_name=msf_module_choice)
-                    all_results.extend(res)
+            # RULARE METASPLOIT (Trece prin lista de module aleasă)
+            if msf_enabled and msf_running and msf_module_choices:
+                for modul in msf_module_choices:
+                    with st.spinner(f"⏳ Rulat Metasploit ({modul})..."):
+                        scanner_msf = MetasploitScanner()
+                        res = scanner_msf.run(current_target, module_type="auxiliary", module_name=modul)
+                        all_results.extend(res)
 
+            # AFIȘARE REZULTATE FINALĂ
             if all_results:
                 status_text.success(f"Scanare Gata! Total evenimente: {len(all_results)}")
                 data = [{"Severitate": r.severity.value, "Tip": r.name, "Descriere": r.description, "Tool": r.tool_used} for r in all_results]
