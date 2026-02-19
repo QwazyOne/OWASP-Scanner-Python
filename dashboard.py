@@ -1,183 +1,154 @@
 import streamlit as st
 import pandas as pd
 import os
-import requests
+import subprocess
+import socket
+import time
 from core.models import Target, TargetType
+
+# --- IMPORTURI MODULE ---
 from modules.recon_nmap import NmapScanner
 from modules.web_sql import SQLMapScanner
-# 1. Configurare Pagină
-st.set_page_config(
-    page_title="OWASP Scanner Pro",
-    page_icon="🛡️",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+from modules.msf_scanner import MetasploitScanner
 
-# --- CSS Custom pentru a face interfața mai compactă pe iPad ---
-st.markdown("""
-    <style>
-        .block-container {padding-top: 1rem; padding-bottom: 0rem;}
-        h1 {margin-top: -3rem;}
-    </style>
-""", unsafe_allow_html=True)
+# --- CACHE PENTRU METASPLOIT ---
+@st.cache_data(show_spinner=False)
+def fetch_msf_modules():
+    """Memorează lista de module ca să nu blocheze interfața"""
+    scanner_msf = MetasploitScanner()
+    if scanner_msf.check_prerequisites():
+        return scanner_msf.get_scanner_modules()
+    return ["scanner/http/title"]
 
+st.set_page_config(page_title="OWASP Scanner Pro", page_icon="🛡️", layout="wide", initial_sidebar_state="expanded")
+
+def is_port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+def start_msfrpcd(password="superparola123"):
+    try:
+        subprocess.Popen(["msfrpcd", "-P", password, "-n", "-a", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except FileNotFoundError:
+        return False
+
+st.markdown("""<style>.block-container {padding-top: 1rem;}</style>""", unsafe_allow_html=True)
 st.title("🛡️ OWASP & Multi-Vector Scanner")
 
 # ==========================================
-# SIDEBAR: SETĂRI GLOBALE & CONTROL
+# SIDEBAR
 # ==========================================
 with st.sidebar:
     st.header("🎯 Țintă & Vector")
-    
-    # Input Global
-    target_input = st.text_input("Adresă IP / URL", value="", help="Ex: 192.168.1.1 sau example.com")
-    
-    # Selectare Vector (Profil)
-    scan_type = st.selectbox(
-        "Vector de Atac",
-        options=[t.value for t in TargetType],
-        index=0,
-        help="Selectează tipul de infrastructură pe care o ataci."
-    )
+    target_input = st.text_input("Adresă (URL/IP)", value="http://testphp.vulnweb.com")
+    scan_type = st.selectbox("Vector", options=[t.value for t in TargetType], index=0)
     
     st.markdown("---")
-    st.header("🛑 Emergency")
+    st.header("⚙️ Servicii de Fundal")
     
-    # Kill Switch
-    if st.button("💀 KILL ALL PROCESSES", type="primary", use_container_width=True):
+    msf_running = is_port_in_use(55553)
+    if msf_running:
+        st.success("🟢 Metasploit RPC: ONLINE")
+    else:
+        st.error("🔴 Metasploit RPC: OFFLINE")
+        if st.button("🔌 Pornește Metasploit (msfrpcd)", use_container_width=True):
+            with st.spinner("Pornesc serverul MSF... (~10 secunde)"):
+                if start_msfrpcd():
+                    time.sleep(8)
+                    st.rerun()
+                else:
+                    st.error("Eroare: Comanda 'msfrpcd' nu a fost găsită.")
+
+    st.markdown("---")
+    if st.button("💀 KILL ALL SCANNERS", type="primary", use_container_width=True):
         os.system("pkill -9 nmap")
         os.system("pkill -9 sqlmap")
-        # Aici vom adăuga și alte tools pe viitor (ex: pkill sqlmap)
-        st.toast("Toate procesele au fost terminate forțat!", icon="🛑")
+        st.toast("Procesele oprite forțat!", icon="🛑")
 
 # ==========================================
-# ZONA PRINCIPALĂ: TAB-URI
+# MAIN TABS & CONFIG
 # ==========================================
+tab_config, tab_results = st.tabs(["🛠️ Configurare Tool-uri", "📊 Rezultate"])
 
-# Creăm tab-urile
-tab_config, tab_results, tab_agents = st.tabs(["🛠️ Configurare", "🖥️ Agenți (C2)", "📊 Rezultate" ])
-
-# --- TAB 1: CONFIGURARE ---
 with tab_config:
-    st.info(f"Configurare activă pentru vectorul: **{scan_type.upper()}**")
-    
-  # --- NMAP CONFIG ---
-    with st.expander("🌐 1. Nmap (Port Scanning)", expanded=False):
+    st.info(f"Ținta curentă: **{target_input}**")
+
+    # 1. NMAP
+    with st.expander("🌐 1. Nmap (Port Scanning)", expanded=True):
         col1, col2 = st.columns(2)
         with col1:
             nmap_enabled = st.checkbox("Activează Nmap", value=True)
         if nmap_enabled:
             mode_label = st.selectbox("Profil Nmap", ["Rapid", "Normal", "Deep"], index=0)
             use_scripts = st.checkbox("Scripturi Vuln", value=False)
-            
-            nmap_mode_map = {"Rapid": "fast", "Normal": "default", "Deep": "deep"}
-            selected_nmap_mode = nmap_mode_map[mode_label]
+            selected_nmap_mode = {"Rapid": "fast", "Normal": "default", "Deep": "deep"}[mode_label]
 
-    # --- SQLMAP CONFIG (NOU) ---
+    # 2. SQLMAP
     with st.expander("💉 2. SQLMap (Web Injection)", expanded=False):
         col_sql_1, col_sql_2 = st.columns(2)
         with col_sql_1:
-            sqlmap_enabled = st.checkbox("Activează SQLMap", value=False, help="Doar pentru URL-uri web!")
-        
+            sqlmap_enabled = st.checkbox("Activează SQLMap", value=False)
         if sqlmap_enabled:
-            st.warning("⚠️ SQLMap poate dura mult și este agresiv!")
             risk_level = st.slider("Risk Level (1-3)", 1, 3, 1)
             intensity_level = st.slider("Intensity Level (1-5)", 1, 5, 1)
 
+    # 3. METASPLOIT
+    with st.expander("🦇 3. Metasploit (Auxiliary & Validation)", expanded=False):
+        col_msf_1, col_msf_2 = st.columns(2)
+        with col_msf_1:
+            msf_enabled = st.checkbox("Activează Metasploit", value=False)
+        
+        msf_module_choice = None
+        if msf_enabled:
+            if not msf_running:
+                st.warning("⚠️ Pornește Serverul Metasploit din stânga mai întâi!")
+            else:
+                dynamic_modules = fetch_msf_modules()
+                msf_module_choice = st.selectbox(
+                    f"Selectează Modulul (din {len(dynamic_modules)} disponibile)", 
+                    options=dynamic_modules,
+                    index=dynamic_modules.index("scanner/http/title") if "scanner/http/title" in dynamic_modules else 0
+                )
+
     st.markdown("---")
+    # --- AICI ERA PROBLEMA TA: Butonul lipsea sau era ascuns! ---
     start_scan = st.button("🚀 LANSEAZĂ SCANAREA COMPLETĂ", type="primary", use_container_width=True)
-        
 
-        
-    # --- TAB-UL NOU: AGENTS ---
-    with tab_agents:
-        st.header("📡 Command & Control Center")
-        
-        if st.button("🔄 Refresh Agents List"):
-            try:
-                # Cerem lista de la API-ul nostru local
-                response = requests.get("http://127.0.0.1:8000/agents/list")
-                if response.status_code == 200:
-                    agents = response.json()
-                    
-                    if agents:
-                        st.success(f"Connectat: {len(agents)} agenți online.")
-                        
-                        # Creăm un tabel frumos
-                        agent_data = []
-                        for name, details in agents.items():
-                            agent_data.append({
-                                "Hostname": name,
-                                "OS": details['os'],
-                                "IP": details['ip'],
-                                "Last Seen": details['last_seen'],
-                                "Status": "🟢 ONLINE"
-                            })
-                        st.table(agent_data)
-                    else:
-                        st.warning("Niciun agent conectat. Rulează 'python agent.py' pe țintă.")
-                else:
-                    st.error("Eroare la comunicarea cu serverul C2.")
-            except Exception as e:
-                st.error(f"Serverul API nu răspunde! Rulează 'uvicorn server_api:app ...'. Eroare: {e}")
 
-# --- LOGICA DE SCANARE ---
+# ==========================================
+# LOGICA DE SCANARE
+# ==========================================
 if start_scan:
     if not target_input:
         st.toast("Introdu o țintă!", icon="❌")
     else:
         with tab_results:
-            results_container = st.container()
             status_text = st.empty()
             all_results = []
-            
             current_target = Target(input=target_input, type=scan_type)
 
-            # 1. Rulăm NMAP (Dacă e bifat)
             if nmap_enabled:
                 with st.spinner("⏳ Rulat Nmap..."):
                     scanner_nmap = NmapScanner()
-                    if scanner_nmap.check_prerequisites():
-                        res = scanner_nmap.run(current_target, mode=selected_nmap_mode, use_scripts=use_scripts)
-                        all_results.extend(res)
-                        st.toast(f"Nmap terminat: {len(res)} rezultate")
+                    res = scanner_nmap.run(current_target, mode=selected_nmap_mode, use_scripts=use_scripts)
+                    all_results.extend(res)
 
-            # 2. Rulăm SQLMAP (Dacă e bifat)
             if sqlmap_enabled:
-                with st.spinner("⏳ Rulat SQLMap (Poate dura câteva minute)..."):
+                with st.spinner("⏳ Rulat SQLMap..."):
                     scanner_sql = SQLMapScanner()
-                    if scanner_sql.check_prerequisites():
-                        # SQLMap are nevoie de URL cu http
-                        if not target_input.startswith("http"):
-                            st.error("SQLMap necesită un URL complet (http://...)")
-                        else:
-                            res = scanner_sql.run(current_target, level=intensity_level, risk=risk_level)
-                            all_results.extend(res)
-                            st.toast(f"SQLMap terminat: {len(res)} rezultate")
-                    else:
-                        st.error("SQLMap nu este instalat!")
+                    res = scanner_sql.run(current_target, level=intensity_level, risk=risk_level)
+                    all_results.extend(res)
 
-            # 3. AFIȘARE FINALĂ
+            if msf_enabled and msf_running and msf_module_choice:
+                with st.spinner(f"⏳ Rulat Metasploit ({msf_module_choice})..."):
+                    scanner_msf = MetasploitScanner()
+                    res = scanner_msf.run(current_target, module_type="auxiliary", module_name=msf_module_choice)
+                    all_results.extend(res)
+
             if all_results:
-                status_text.success(f"Scanare Gata! Total probleme: {len(all_results)}")
-                
-                # Procesare date pentru tabel
-                data = []
-                for r in all_results:
-                    data.append({
-                        "Severitate": r.severity.value,
-                        "Tip": r.name,
-                        "Descriere": r.description,
-                        "Tool": r.tool_used
-                    })
-                
-                df = pd.DataFrame(data)
-                st.dataframe(
-                    df, 
-                    use_container_width=True,
-                    column_config={
-                        "Descriere": st.column_config.TextColumn("Detalii", width="large")
-                    }
-                )
+                status_text.success(f"Scanare Gata! Total evenimente: {len(all_results)}")
+                data = [{"Severitate": r.severity.value, "Tip": r.name, "Descriere": r.description, "Tool": r.tool_used} for r in all_results]
+                st.dataframe(pd.DataFrame(data), use_container_width=True, column_config={"Descriere": st.column_config.TextColumn("Detalii", width="large")})
             else:
-                status_text.warning("Nu au fost găsite vulnerabilități sau tool-urile nu au returnat date.")
+                status_text.warning("Nu au fost găsite date.")
