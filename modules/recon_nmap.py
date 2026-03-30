@@ -40,7 +40,6 @@ class NmapScanner(BaseScannerModule):
 
             if use_scripts:
                 command.extend(["--script", "vuln"])
-
             command.append(clean_target) 
 
             process = subprocess.run(command, capture_output=True, text=True)
