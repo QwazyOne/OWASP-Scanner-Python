@@ -94,7 +94,7 @@ with tab_config:
     st.markdown("---")
     
     # Butonul mare de START
-    start_scan = st.button("🚀 LANSEAZĂ SCANAREA", type="primary", use_container_width=True)
+    start_scan = st.button("🚀 LANSEAZĂ SCANAREA", type="primary", use_container_width=False)
 
 
 # --- LOGICA DE SCANARE ---
