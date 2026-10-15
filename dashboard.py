@@ -1,9 +1,8 @@
 import streamlit as st
 import pandas as pd
 import os
-import subprocess
-import socket
 import time
+import socket
 from core.models import Target, TargetType
 from core.database import DatabaseManager
 from core.report_generator import generate_pdf_bytes
@@ -11,10 +10,29 @@ from core.report_generator import generate_pdf_bytes
 # --- IMPORTURI MODULE ---
 from modules.recon_nmap import NmapScanner
 from modules.web_sql import SQLMapScanner
+from modules.web_nikto import NiktoScanner
 from modules.msf_scanner import MetasploitScanner
 
-# --- INITIALIZĂRI ---
+# --- INITIALIZARE ---
 db = DatabaseManager()
+
+if 'msf_paths' not in st.session_state: st.session_state['msf_paths'] = []
+if 'last_results' not in st.session_state: st.session_state['last_results'] = []
+if 'search_performed' not in st.session_state: st.session_state['search_performed'] = False
+
+def is_port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('127.0.0.1', port)) == 0
+
+def start_msfrpcd(password="superparola123"):
+    try:
+        # Folosim 'nohup' si '&' pentru a detasa complet procesul de mediul virtual Python
+        comanda = f"nohup msfrpcd -P {password} -a 127.0.0.1 > /dev/null 2>&1 &"
+        os.system(comanda)
+        return True
+    except Exception as e:
+        print(f"[!] Eroare MSF RPC: {e}")
+        return False
 
 @st.cache_data(show_spinner=False)
 def fetch_msf_modules():
@@ -23,307 +41,212 @@ def fetch_msf_modules():
         return scanner_msf.get_scanner_modules()
     return ["scanner/http/title"]
 
-def is_port_in_use(port: int) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        return s.connect_ex(('127.0.0.1', port)) == 0
+def get_severity_str(obj):
+    if "metasploit" in str(obj.tool_used).lower(): return "HIGH"
+    if hasattr(obj.severity, 'name'): return str(obj.severity.name).upper()
+    return str(obj.severity).upper()
 
-def start_msfrpcd(password="superparola123"):
-    try:
-        subprocess.Popen(["msfrpcd", "-P", password, "-n", "-a", "127.0.0.1"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True
-    except FileNotFoundError:
+def is_valid_vuln(obj):
+    tool = str(obj.tool_used).lower()
+    desc = str(obj.description).lower()
+    
+    # 1. Ignorăm erorile comune de conexiune sau mesaje de sistem
+    noise_keywords = [
+        "unable to connect", "could not connect", "failed to load", 
+        "out of date", "usage:", "metasploit v6", "connection refused",
+        "0 host(s) tested", "runtimeerror"
+    ]
+    if any(noise in desc for noise in noise_keywords):
         return False
 
-# ==========================================
-# FUNCȚII DE FILTRARE ȘI SALVARE 
-# ==========================================
-def is_real_vulnerability(result_obj) -> bool:
-    try:
-        text_desc = str(result_obj.description).lower()
-        tool = str(result_obj.tool_used).lower()
+    # 2. Reguli specifice pentru rezultate POZITIVE
+    if "metasploit" in tool:
+        # Metasploit confirmă rezultatele cu [+]
+        return "[+]" in desc
         
-        if hasattr(result_obj.severity, 'value'):
-            severity_str = str(result_obj.severity.value).upper()
-        elif hasattr(result_obj.severity, 'name'):
-            severity_str = str(result_obj.severity.name).upper()
-        else:
-            severity_str = str(result_obj.severity).upper()
+    if "nikto" in tool:
+        # Nikto marchează descoperirile cu + (fără paranteze)
+        return "+" in desc and "target" not in desc.lower()
 
-        if "sqlmap" in tool:
-            if severity_str != "INFO": return True
-                
-        if "metasploit" in tool:
-            if "[+]" in str(result_obj.description) and "failed" not in text_desc and "error" not in text_desc:
-                return True
-    except Exception as e:
-        print(f"Eroare la filtrare: {e}")
+    if "sqlmap" in tool:
+        # SQLMap este de obicei valid dacă ajunge în listă, dar filtrăm mesajele INFO
+        if hasattr(obj.severity, 'name'):
+            return obj.severity.name != "INFO"
+        return "vulnerable" in desc or "injection" in desc
+
     return False
 
-def get_severity_string(result_obj) -> str:
-    tool = str(result_obj.tool_used).lower()
-    if "metasploit" in tool: return "HIGH"
-    if hasattr(result_obj.severity, 'name'): return str(result_obj.severity.name).upper()
-    if hasattr(result_obj.severity, 'value'): return str(result_obj.severity.value).upper()
-    return str(result_obj.severity).upper()
-
-# ==========================================
-# CONFIGURARE PAGINĂ
-# ==========================================
-st.set_page_config(page_title="OWASP Framework", page_icon="🛡️", layout="wide", initial_sidebar_state="expanded")
-st.markdown("""<style>.block-container {padding-top: 1rem;}</style>""", unsafe_allow_html=True)
-
+# --- CONFIG PAGINA ---
+st.set_page_config(page_title="Professional VMS", layout="wide")
 st.title("🛡️ Advanced Vulnerability Management Framework")
 
 with st.sidebar:
     st.header("⚙️ System Status")
     msf_running = is_port_in_use(55553)
-    if msf_running:
-        st.success("🟢 Metasploit RPC: ONLINE")
+    if msf_running: st.success("🟢 Metasploit RPC: ONLINE")
     else:
         st.error("🔴 Metasploit RPC: OFFLINE")
-        if st.button("🔌 Start MSF Daemon", use_container_width=True):
-            with st.spinner("Booting MSF RPC... (~20s)"):
-                if start_msfrpcd():
-                    time.sleep(20)
-                    st.rerun()
-                else:
-                    st.error("Error: 'msfrpcd' not found.")
+        if st.button("🔌 Start MSF"):
+            start_msfrpcd(); time.sleep(15); st.rerun()
 
     st.markdown("---")
     st.header("🛑 Emergency Controls")
     if st.button("💀 KILL ALL SCANNERS", type="primary", use_container_width=True):
-        os.system("pkill -9 nmap")
-        os.system("pkill -9 sqlmap")
-        st.toast("Toate procesele de scanare au fost oprite!", icon="🛑")
+        os.system("pkill -9 nmap"); os.system("pkill -9 sqlmap"); os.system("pkill -9 nikto")
+        os.system("pkill -f msfrpcd"); os.system("pkill -f ruby")
+        st.session_state['last_results'] = []
+        st.toast("Procese oprite!", icon="🛑")
+        time.sleep(1); st.rerun()
 
+tab_recon, tab_attack = st.tabs(["🌐 1. Recon & Assets (Nmap)", "🎯 2. Attack Pipeline (Moștenit)"])
 
-tab_recon, tab_attack = st.tabs(["🌐 1. Reconnaissance & Assets", "🎯 2. Targeted Attack & Exploitation"])
-
-# ------------------------------------------
+# ==========================================
 # TAB 1: RECON & ASSETS
-# ------------------------------------------
+# ==========================================
 with tab_recon:
-    st.header("🔍 Discovery (Adaugă o țintă nouă)")
-    
-    col_input, col_btn = st.columns([3, 1])
-    with col_input:
-        new_target_input = st.text_input("IP sau Domeniu (ex: testphp.vulnweb.com)", placeholder="192.168.1.1")
-    with col_btn:
+    st.header("🔍 Asset Discovery")
+    col_in, col_go = st.columns([3, 1])
+    with col_in: target_input = st.text_input("Target IP/Domain", placeholder="ex: testphp.vulnweb.com")
+    with col_go:
         st.markdown("<br>", unsafe_allow_html=True)
-        run_recon = st.button("🚀 Run Nmap Discovery", use_container_width=True)
-
-    with st.expander("⚙️ Setări Nmap Avanaste"):
-        mode_label = st.selectbox("Profil Scanare", ["Rapid (-F)", "Normal (-sV)", "Deep (-p- -sV)"], index=0)
-        use_scripts = st.checkbox("Rulează scripturi de vulnerabilitate Nmap (--script vuln)")
-        nmap_mode_map = {"Rapid (-F)": "fast", "Normal (-sV)": "default", "Deep (-p- -sV)": "deep"}
-
-    if run_recon and new_target_input:
-        with st.spinner(f"Scaning {new_target_input} with Nmap. Saving to database..."):
-            scanner = NmapScanner()
-            target_obj = Target(input=new_target_input, type=list(TargetType)[0]) 
-            scanner.run(target_obj, mode=nmap_mode_map[mode_label], use_scripts=use_scripts)
-            st.success("Scanare completă! Datele au fost salvate în Istoric.")
-            time.sleep(1)
-            st.rerun()
+        if st.button("🚀 Start Nmap Recon", use_container_width=True):
+            with st.spinner("Cartografiem rețeaua cu Nmap..."):
+                scanner = NmapScanner()
+                scanner.run(Target(input=target_input, type=list(TargetType)[0]))
+                st.rerun()
 
     st.markdown("---")
-    st.header("🗄️ Asset Inventory (Istoric Ținte)")
-    
     targets = db.get_all_targets()
-    
-    if not targets:
-        st.info("Baza de date este goală. Rulează o scanare Nmap pentru a adăuga ținte.")
-    else:
-        for t in targets:
-            with st.expander(f"📌 {t['host']} (Ultima scanare: {t['last_scanned']})"):
-                col_info, col_actions = st.columns([4, 1])
-                
-                with col_info:
-                    # Afișăm Porturile
-                    ports = db.get_ports_for_target(t['id'])
-                    if ports:
-                        st.markdown("**Porturi Deschise:**")
-                        st.dataframe(pd.DataFrame(ports), use_container_width=True, hide_index=True)
-                    else:
-                        st.warning("Niciun port deschis găsit.")
-                        
-                    # Afișăm Vulnerabilitățile Salvate
-                    vulns = db.get_vulnerabilities_for_target(t['id'])
-                    if vulns:
-                        st.markdown("**🚨 Vulnerabilități Confirmate (Salvate):**")
-                        df_vulns = pd.DataFrame(vulns)
-                        st.dataframe(df_vulns, use_container_width=True, hide_index=True)
-                
-                with col_actions:
-                    # BUTONUL MAGIC DE PDF
-                    pdf_data = generate_pdf_bytes(db, t['id'])
-                    if pdf_data:
-                        st.download_button(
-                            label="📄 Descarcă PDF",
-                            data=pdf_data,
-                            file_name=f"Audit_Raport_{t['host']}.pdf",
-                            mime="application/pdf",
-                            use_container_width=True,
-                            key=f"pdf_{t['id']}"
-                        )
-                        
-                    st.markdown("<br>", unsafe_allow_html=True) # Spațiere
-                    
-                    # Butonul de ștergere
-                    if st.button("🗑️ Șterge Proiect", key=f"del_{t['id']}", type="secondary", use_container_width=True):
-                        db.delete_target(t['id'])
-                        st.toast(f"Ținta {t['host']} a fost ștearsă!", icon="✅")
-                        time.sleep(0.5)
-                        st.rerun()
-                
-# ------------------------------------------
-# TAB 2: TARGETED ATTACK
-# ------------------------------------------
+    for t in targets:
+        with st.expander(f"📌 {t['host']} (Last Scanned: {t['last_scanned']})"):
+            c_info, c_actions = st.columns([4, 1])
+            with c_info:
+                p = db.get_ports_for_target(t['id'])
+                if p: st.dataframe(pd.DataFrame(p), use_container_width=True, hide_index=True)
+                v = db.get_vulnerabilities_for_target(t['id'])
+                if v: 
+                    st.markdown("**🚨 Vulnerabilități Salvate:**")
+                    st.dataframe(pd.DataFrame(v), use_container_width=True, hide_index=True)
+            with c_actions:
+                pdf = generate_pdf_bytes(db, t['id'])
+                if pdf: st.download_button("📄 PDF Report", data=pdf, file_name=f"Report_{t['host']}.pdf", mime="application/pdf", use_container_width=True, key=f"pdf_{t['id']}")
+                if st.button("🗑️ Delete", key=f"del_{t['id']}", use_container_width=True):
+                    db.delete_target(t['id']); st.rerun()
+
+# ==========================================
+# TAB 2: SMART ATTACK PIPELINE
+# ==========================================
 with tab_attack:
-    st.header("🎯 Targeted Exploitation")
-    
     if not targets:
-        st.warning("Nu ai nicio țintă în baza de date. Mergi la tab-ul 'Reconnaissance' și scanează o țintă mai întâi.")
+        st.warning("Adaugă o țintă în Tab 1 mai întâi!")
     else:
-        target_options = {t['id']: t['host'] for t in targets}
-        selected_target_id = st.selectbox("Alege Ținta pentru atac:", options=list(target_options.keys()), format_func=lambda x: target_options[x])
-        selected_host = target_options[selected_target_id]
+        target_map = {t['id']: t['host'] for t in targets}
+        sel_id = st.selectbox("🎯 Selectează Ținta pentru Atac:", options=list(target_map.keys()), format_func=lambda x: target_map[x])
+        sel_host = target_map[sel_id]
+
+        # ---------------------------------------------------------
+        # INTELIGENȚA CONTEXTUALĂ: Analizăm istoricul Nmap
+        # ---------------------------------------------------------
+        target_ports = db.get_ports_for_target(sel_id)
         
-        known_ports = db.get_ports_for_target(selected_target_id)
-        open_ports_str = ", ".join([str(p['port']) for p in known_ports]) if known_ports else "Niciun port cunoscut"
-        st.info(f"**Intel:** Ținta `{selected_host}` are porturile deschise: **{open_ports_str}**")
-
-        st.markdown("---")
-        with st.expander("🔍 MSF Exploit Suggester (Caută & Lansează)", expanded=True):
-            col_search, col_sbtn = st.columns([4, 1])
-            with col_search:
-                search_query = st.text_input("Cuvânt cheie", placeholder="ex: nginx", label_visibility="collapsed")
-            with col_sbtn:
-                do_search = st.button("🔎 Caută în MSF", use_container_width=True)
-                
-            if do_search and search_query:
-                if not msf_running:
-                    st.error("Metasploit este OFFLINE.")
-                else:
-                    with st.spinner(f"Caut în baza de date MSF după '{search_query}'..."):
-                        msf_scanner = MetasploitScanner()
-                        search_result = msf_scanner.search_modules(search_query)
-                        st.code(search_result, language="text")
-                        extrase = msf_scanner.extract_module_paths(search_result)
-                        st.session_state['msf_search_results'] = extrase
-
-            if 'msf_search_results' in st.session_state and st.session_state['msf_search_results']:
-                lista_module = st.session_state['msf_search_results']
-                st.success(f"✅ Am extras automat {len(lista_module)} module din rezultate!")
-                
-                col_mod, col_lhost, col_tid = st.columns([2, 1, 1])
-                with col_mod: modul_ales = st.selectbox("Alege modulul:", options=lista_module)
-                with col_lhost: user_lhost = st.text_input("LHOST (IP-ul tău)", placeholder="ex: 192.168.1.100")
-                with col_tid: user_target = st.text_input("Target ID", placeholder="ex: 1")
-
-                # ==========================================
-                # EXECUTIE: QUICK FIRE
-                # ==========================================
-                quick_fire = st.button("⚡ Quick Fire (Lansează)", type="primary", use_container_width=True)
-                
-                if quick_fire:
-                    parti = modul_ales.split('/', 1)
-                    with st.spinner(f"Execut {modul_ales} pe {selected_host}..."):
-                        msf_scanner = MetasploitScanner()
-                        attack_target_obj = Target(input=selected_host, type=list(TargetType)[0])
-                        res = msf_scanner.run(attack_target_obj, module_type=parti[0], module_name=parti[1], lhost=user_lhost, target_id=user_target)
-                        
-                        salvate_qf = 0
-                        for r in res:
-                            if is_real_vulnerability(r):
-                                sev_val = get_severity_string(r)
-                                db.add_vulnerability(selected_target_id, str(r.tool_used), str(r.name), sev_val, str(r.description))
-                                salvate_qf += 1
-                        
-                        # Salvăm statusul în sesiune și dăm rerun
-                        st.session_state['qf_msg'] = f"Salvat în DB: {salvate_qf} descoperiri MSF! 💾" if salvate_qf > 0 else None
-                        st.session_state['qf_table'] = [{"Tip": r.name, "Descriere": r.description} for r in res] if res else None
-                        st.rerun()
-
-                # Afișare din memorie (persistență după rerun)
-                if st.session_state.get('qf_msg'):
-                    st.success(st.session_state['qf_msg'])
-                if st.session_state.get('qf_table') is not None:
-                    if st.session_state['qf_table']:
-                        st.table(pd.DataFrame(st.session_state['qf_table']))
-                    else:
-                        st.warning("Modulul a rulat, dar nu a generat niciun rezultat util.")
-
-
-        st.markdown("---")
-        st.subheader("Configurare Atac (Scanare Multiplă)")
+        # Căutăm porturi web (80, 443, 8080, etc) sau servicii care conțin 'http'
+        web_ports = [p['port'] for p in target_ports if p['port'] in [80, 443, 8000, 8080, 8443] or 'http' in str(p.get('service_name') or p.get('service') or '').lower()]
+        st.markdown("### 🧬 Flux de Atac Moștenit (Pipeline)")
         
-        with st.expander("💉 SQLMap (Web Injection)"):
-            sqlmap_enabled = st.checkbox("Activează SQLMap pe această țintă")
-            sql_path = st.text_input("Cale vulnerabilă (Opțional)", placeholder="/artists.php?artist=1")
-            col_s1, col_s2 = st.columns(2)
-            with col_s1: risk_level = st.slider("Risk", 1, 3, 1)
-            with col_s2: intensity_level = st.slider("Intensity", 1, 5, 1)
+        # Stabilim URL-ul de bază
+        base_url = ""
+        if web_ports:
+            st.success(f"🌐 S-au detectat servicii WEB pe porturile: **{web_ports}**. Fluxul web a fost activat!")
+            port_to_use = web_ports[0]
+            protocol = "https" if port_to_use in [443, 8443] else "http"
+            
+            if port_to_use in [80, 443]: base_url = f"{protocol}://{sel_host}"
+            else: base_url = f"{protocol}://{sel_host}:{port_to_use}"
+        else:
+            st.warning("⚠️ Nmap nu a detectat porturi web standard. Poți introduce link-ul manual pentru a forța atacul web.")
+            base_url = st.text_input("URL Web Manual:", value=f"http://{sel_host}")
 
-        with st.expander("🦇 Metasploit (Auxiliary Scanners)"):
-            msf_enabled = st.checkbox("Activează Metasploit pe această țintă")
-            msf_module_choices = []
-            if msf_enabled and msf_running:
-                dynamic_modules = fetch_msf_modules()
-                msf_module_choices = st.multiselect("Alege Modulele:", options=dynamic_modules)
-
-        # ==========================================
-        # EXECUTIE: BATCH ATTACK
-        # ==========================================
-        start_attack = st.button("🔥 LANSEAZĂ ATACUL BATCH", type="primary", use_container_width=True)
-        
-        if start_attack:
-            attack_results = []
-            attack_url = f"http://{selected_host}{sql_path}" if sqlmap_enabled and sql_path else selected_host
-            attack_target_obj = Target(input=attack_url, type=list(TargetType)[0])
-
-            if sqlmap_enabled:
-                with st.spinner("Executing SQLMap..."):
-                    scanner_sql = SQLMapScanner()
-                    attack_results.extend(scanner_sql.run(attack_target_obj, level=intensity_level, risk=risk_level))
-
-            if msf_enabled and msf_running and msf_module_choices:
-                for modul in msf_module_choices:
-                    with st.spinner(f"Executing MSF ({modul})..."):
-                        scanner_msf = MetasploitScanner()
-                        parti_batch = modul.split('/', 1)
-                        attack_results.extend(scanner_msf.run(attack_target_obj, module_type=parti_batch[0], module_name=parti_batch[1]))
-
-            if attack_results:
-                salvate_batch = 0
-                for r in attack_results:
-                    if is_real_vulnerability(r):
-                        sev_val = get_severity_string(r)
-                        db.add_vulnerability(selected_target_id, str(r.tool_used), str(r.name), sev_val, str(r.description))
-                        salvate_batch += 1
-
-                # Salvăm statusul în sesiune și dăm rerun
-                if salvate_batch > 0:
-                    st.session_state['batch_msg'] = f"Atac finalizat! Am salvat {salvate_batch} vulnerabilități confirmate în baza de date! 💾"
-                    st.session_state['batch_msg_type'] = "success"
-                else:
-                    st.session_state['batch_msg'] = f"Atac finalizat. {len(attack_results)} verificări rulate, nicio vulnerabilitate salvată."
-                    st.session_state['batch_msg_type'] = "info"
+        # ---------------------------------------------------------
+        # CONFIGURAREA FLUXULUI (WIZARD)
+        # ---------------------------------------------------------
+        with st.form("pipeline_form"):
+            st.markdown("#### Pasul 1: Aplicații Web (Nikto & SQLMap)")
+            
+            col_w1, col_w2 = st.columns(2)
+            with col_w1:
+                run_nikto = st.checkbox("Rulare Nikto (Vulnerabilități Web & Configurații)", value=bool(web_ports))
+                st.caption(f"Ținta pentru Nikto: `{base_url}`")
                 
-                st.session_state['batch_table'] = [{"Severitate": get_severity_string(r), "Tip": r.name, "Descriere": r.description, "Tool": r.tool_used} for r in attack_results]
-            else:
-                st.session_state['batch_msg'] = "Nu ai selectat niciun tool pentru atac, sau nu s-au generat rezultate."
-                st.session_state['batch_msg_type'] = "warning"
-                st.session_state['batch_table'] = None
-                
+            with col_w2:
+                run_sqlmap = st.checkbox("Rulare SQLMap (Injecții Baze de Date)", value=False)
+                sql_path = st.text_input("Cale vulnerabilă pentru SQLMap (Obligatoriu dacă e bifat)", placeholder="/pagina.php?id=1")
+                if run_sqlmap and not sql_path:
+                    st.error("❗ Ai bifat SQLMap, dar nu ai oferit o cale (ex: /index.php?id=1).")
+
+            st.markdown("#### Pasul 2: Exploatare de Sistem (Metasploit)")
+            run_msf = st.checkbox("Rulare Metasploit Auxiliary", value=False)
+            msf_mods = st.multiselect("Selectează modulele MSF:", options=fetch_msf_modules() if msf_running else [], help="Selectează modulele bazat pe porturile găsite de Nmap.")
+            if run_msf and not msf_running:
+                st.error("Metasploit este offline! Pornește-l din stânga.")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            submit_pipeline = st.form_submit_button("🔥 LANSEAZĂ PIPELINE-UL", type="primary", use_container_width=True)
+
+        # ---------------------------------------------------------
+        # EXECUȚIA ÎN CASCADĂ (INHERITED EXECUTION)
+        # ---------------------------------------------------------
+        if submit_pipeline:
+            pipeline_results = []
+            
+            # 1. NIKTO (Analiza generală web)
+            if run_nikto:
+                with st.spinner(f"🌐 [1/3] Nikto scanează {base_url}..."):
+                    nikto_scanner = NiktoScanner()
+                    res_nikto = nikto_scanner.run(Target(input=base_url, type=list(TargetType)[0]))
+                    pipeline_results.extend(res_nikto)
+            
+            # 2. SQLMAP (Analiza bazelor de date)
+            if run_sqlmap and sql_path:
+                full_sql_url = f"{base_url}{sql_path}"
+                with st.spinner(f"💉 [2/3] SQLMap atacă {full_sql_url}..."):
+                    sql_scanner = SQLMapScanner()
+                    res_sql = sql_scanner.run(Target(input=full_sql_url, type=list(TargetType)[0]))
+                    pipeline_results.extend(res_sql)
+
+            # 3. METASPLOIT (Exploatare finală / servicii de sistem)
+            if run_msf and msf_running and msf_mods:
+                with st.spinner("🦇 [3/3] Metasploit execută modulele..."):
+                    msf = MetasploitScanner()
+                    for m in msf_mods:
+                        m_t, m_n = m.split('/', 1)
+                        res_msf = msf.run(Target(input=sel_host, type=list(TargetType)[0]), m_t, m_n)
+                        pipeline_results.extend(res_msf)
+
+            # Salvare automată în baza de date
+            salvate = 0
+            for r in pipeline_results:
+                if is_valid_vuln(r):
+                    db.add_vulnerability(sel_id, str(r.tool_used), r.name, get_severity_str(r), r.description)
+                    salvate += 1
+            
+            # Actualizare UI Fix
+            st.session_state['last_results'] = [{"Tool": r.tool_used, "Nume": r.name, "Descriere": r.description, "Severitate": get_severity_str(r)} for r in pipeline_results]
+            
+            if salvate > 0: st.toast(f"Pipeline finalizat! Am salvat {salvate} vulnerabilități.", icon="✅")
             st.rerun()
 
-        # Afișare din memorie (persistență după rerun)
-        if 'batch_msg' in st.session_state:
-            msg_type = st.session_state.get('batch_msg_type', 'info')
-            if msg_type == "success": st.success(st.session_state['batch_msg'])
-            elif msg_type == "warning": st.warning(st.session_state['batch_msg'])
-            else: st.info(st.session_state['batch_msg'])
-                
-        if st.session_state.get('batch_table'):
-            st.dataframe(pd.DataFrame(st.session_state['batch_table']), use_container_width=True)
+        # ---------------------------------------------------------
+        # AFIȘAREA REZULTATELOR PIPELINE-ULUI
+        # ---------------------------------------------------------
+        if st.session_state['last_results']:
+            st.markdown("---")
+            st.header("📋 Rezultatele Pipeline-ului")
+            if st.button("🧹 Curăță Rezultatele"):
+                st.session_state['last_results'] = []; st.rerun()
+
+            df_res = pd.DataFrame(st.session_state['last_results'])
+            st.dataframe(df_res[["Tool", "Nume", "Severitate"]], use_container_width=True)
+
+            for item in st.session_state['last_results']:
+                with st.expander(f"👁️ Detalii Tehnice: {item['Nume']} ({item['Tool'].upper()})"):
+                    st.code(item['Descriere'], language="text")
