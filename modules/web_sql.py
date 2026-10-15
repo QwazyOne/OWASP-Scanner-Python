@@ -76,8 +76,7 @@ class SQLMapScanner(BaseScannerModule):
             else:
                 # Dacă nu găsim nimic, afișăm în consolă de ce (pentru debug)
                 self.log("Scan finished. No common vulnerabilities found in output.", level="info")
-                # Poți decomenta linia de mai jos dacă vrei să vezi output-ul când nu găsește nimic:
-                # print(output[:500]) 
+                print(output[:500]) 
 
         except Exception as e:
             self.log(f"Error running sqlmap: {e}", level="error")
