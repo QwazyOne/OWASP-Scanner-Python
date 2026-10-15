@@ -3,7 +3,7 @@ import pandas as pd
 import os
 from core.models import Target, TargetType
 from modules.recon_nmap import NmapScanner
-
+from modules.web_sql import SQLMapScanner
 # 1. Configurare Pagină
 st.set_page_config(
     page_title="OWASP Scanner Pro",
@@ -45,6 +45,7 @@ with st.sidebar:
     # Kill Switch
     if st.button("💀 KILL ALL PROCESSES", type="primary", use_container_width=True):
         os.system("pkill -9 nmap")
+        os.system("pkill -9 sqlmap")
         # Aici vom adăuga și alte tools pe viitor (ex: pkill sqlmap)
         st.toast("Toate procesele au fost terminate forțat!", icon="🛑")
 
@@ -59,115 +60,89 @@ tab_config, tab_results = st.tabs(["🛠️ Configurare Tool-uri", "📊 Rezulta
 with tab_config:
     st.info(f"Configurare activă pentru vectorul: **{scan_type.upper()}**")
     
-    # Container pentru NMAP (Îl punem într-un Expander ca să nu ocupe loc dacă nu vrem)
-    with st.expander("🌐 Nmap (Network Reconnaissance)", expanded=True):
-        col_nmap_1, col_nmap_2 = st.columns(2)
-        
-        with col_nmap_1:
-            scan_mode_label = st.selectbox(
-                "Profil Scanare",
-                options=["Rapid (Fast)", "Normal (Default)", "Adânc (Deep)"],
-                index=1,
-                key="nmap_mode"
-            )
-        
-        with col_nmap_2:
-            use_scripts = st.checkbox(
-                "Activează Scripturi NSE (--script=vuln)", 
-                value=False,
-                help="Rulează scripturi de detectare CVE. Durează mai mult!"
-            )
+  # --- NMAP CONFIG ---
+    with st.expander("🌐 1. Nmap (Port Scanning)", expanded=True):
+        col1, col2 = st.columns(2)
+        with col1:
+            nmap_enabled = st.checkbox("Activează Nmap", value=True)
+        if nmap_enabled:
+            mode_label = st.selectbox("Profil Nmap", ["Rapid", "Normal", "Deep"], index=0)
+            use_scripts = st.checkbox("Scripturi Vuln", value=False)
             
-        # Mapping pentru codul intern
-        mode_map = {
-            "Rapid (Fast)": "fast",
-            "Normal (Default)": "default",
-            "Adânc (Deep)": "deep"
-        }
-        selected_mode = mode_map[scan_mode_label]
+            nmap_mode_map = {"Rapid": "fast", "Normal": "default", "Deep": "deep"}
+            selected_nmap_mode = nmap_mode_map[mode_label]
 
-    # --- AICI VOM ADĂUGA VIITOARELE TOOL-URI ---
-    # Exemplu pentru viitor (doar vizual acum):
-    # with st.expander("💉 SQLMap (Database Injection)", expanded=False):
-    #     st.text("Opțiunile SQLMap vor apărea aici...")
+    # --- SQLMAP CONFIG (NOU) ---
+    with st.expander("💉 2. SQLMap (Web Injection)", expanded=False):
+        col_sql_1, col_sql_2 = st.columns(2)
+        with col_sql_1:
+            sqlmap_enabled = st.checkbox("Activează SQLMap", value=False, help="Doar pentru URL-uri web!")
+        
+        if sqlmap_enabled:
+            st.warning("⚠️ SQLMap poate dura mult și este agresiv!")
+            risk_level = st.slider("Risk Level (1-3)", 1, 3, 1)
+            intensity_level = st.slider("Intensity Level (1-5)", 1, 5, 1)
 
     st.markdown("---")
-    
-    # Butonul mare de START
-    start_scan = st.button("🚀 LANSEAZĂ SCANAREA", type="primary", use_container_width=False)
-
+    start_scan = st.button("🚀 LANSEAZĂ SCANAREA COMPLETĂ", type="primary", use_container_width=True)
 
 # --- LOGICA DE SCANARE ---
 if start_scan:
     if not target_input:
-        st.toast("Te rog introdu o țintă validă!", icon="❌")
+        st.toast("Introdu o țintă!", icon="❌")
     else:
-        # Mutăm focusul automat pe tab-ul de rezultate (vizual)
-        
         with tab_results:
-            status_container = st.empty() # Placeholder pentru status
+            results_container = st.container()
+            status_text = st.empty()
+            all_results = []
             
-            with st.spinner(f"Execut scanare pe {target_input}..."):
-                try:
-                    # 1. Pregătire
-                    current_target = Target(input=target_input, type=scan_type)
-                    
-                    # 2. Execuție Module
-                    # Aici putem selecta ce module rulăm bazat pe ce expandere sunt deschise (pe viitor)
-                    scanner = NmapScanner()
-                    
-                    if scanner.check_prerequisites():
-                        results = scanner.run(current_target, mode=selected_mode, use_scripts=use_scripts)
-                        
-                        # 3. Afișare Rezultate
-                        if results:
-                            status_container.success(f"Gata! Am găsit {len(results)} probleme.")
-                            
-                            # Pregătire date tabel
-                            data = []
-                            for res in results:
-                                data.append({
-                                    "Severitate": res.severity.value,
-                                    "Vulnerabilitate": res.name,
-                                    "Descriere": res.description,
-                                    "Tool": res.tool_used
-                                })
-                            
-                            df = pd.DataFrame(data)
-                            
-                            # Configurare culori pentru severitate (Opțional, vizual)
-                            def color_severity(val):
-                                color = 'green'
-                                if val == 'HIGH' or val == 'CRITICAL': color = 'red'
-                                elif val == 'MEDIUM': color = 'orange'
-                                return f'color: {color}'
+            current_target = Target(input=target_input, type=scan_type)
 
-                            # Afișare Tabel
-                            st.dataframe(
-                                df,
-                                use_container_width=True,
-                                column_config={
-                                    "Severitate": st.column_config.TextColumn("Sev.", width="small"),
-                                    "Descriere": st.column_config.TextColumn("Detalii Tehnice", width="large"),
-                                }
-                            )
-                            
-                            # Metrici rapide
-                            m1, m2, m3 = st.columns(3)
-                            m1.metric("Total", len(results))
-                            m2.metric("High/Crit", len([r for r in results if r.severity.value in ['HIGH', 'CRITICAL']]))
-                            m3.metric("Tool", "Nmap")
-                            
+            # 1. Rulăm NMAP (Dacă e bifat)
+            if nmap_enabled:
+                with st.spinner("⏳ Rulat Nmap..."):
+                    scanner_nmap = NmapScanner()
+                    if scanner_nmap.check_prerequisites():
+                        res = scanner_nmap.run(current_target, mode=selected_nmap_mode, use_scripts=use_scripts)
+                        all_results.extend(res)
+                        st.toast(f"Nmap terminat: {len(res)} rezultate")
+
+            # 2. Rulăm SQLMAP (Dacă e bifat)
+            if sqlmap_enabled:
+                with st.spinner("⏳ Rulat SQLMap (Poate dura câteva minute)..."):
+                    scanner_sql = SQLMapScanner()
+                    if scanner_sql.check_prerequisites():
+                        # SQLMap are nevoie de URL cu http
+                        if not target_input.startswith("http"):
+                            st.error("SQLMap necesită un URL complet (http://...)")
                         else:
-                            status_container.warning("Scanare completă, dar nu au fost găsite vulnerabilități.")
+                            res = scanner_sql.run(current_target, level=intensity_level, risk=risk_level)
+                            all_results.extend(res)
+                            st.toast(f"SQLMap terminat: {len(res)} rezultate")
                     else:
-                        status_container.error("Nmap nu este instalat!")
-                        
-                except Exception as e:
-                    st.error(f"Eroare execuție: {e}")
+                        st.error("SQLMap nu este instalat!")
 
-# --- TAB 2: REZULTATE (Placeholder dacă nu e scanare activă) ---
-# Acest tab se va popula automat când rulează scanarea, dar punem un mesaj default
-if not start_scan:
-    with tab_results:
-        st.info("Apasă 'Lansează Scanarea' pentru a vedea rezultatele aici.")
+            # 3. AFIȘARE FINALĂ
+            if all_results:
+                status_text.success(f"Scanare Gata! Total probleme: {len(all_results)}")
+                
+                # Procesare date pentru tabel
+                data = []
+                for r in all_results:
+                    data.append({
+                        "Severitate": r.severity.value,
+                        "Tip": r.name,
+                        "Descriere": r.description,
+                        "Tool": r.tool_used
+                    })
+                
+                df = pd.DataFrame(data)
+                st.dataframe(
+                    df, 
+                    use_container_width=True,
+                    column_config={
+                        "Descriere": st.column_config.TextColumn("Detalii", width="large")
+                    }
+                )
+            else:
+                status_text.warning("Nu au fost găsite vulnerabilități sau tool-urile nu au returnat date.")
