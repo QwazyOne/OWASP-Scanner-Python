@@ -26,7 +26,7 @@ def read_root():
     return {"status": "C2 Server Running", "agents_online": len(active_agents)}
 
 
-/
+
 @app.post("/agent/heartbeat")
 def heartbeat(agent: AgentRegistration):
     agent_id = agent.hostname
