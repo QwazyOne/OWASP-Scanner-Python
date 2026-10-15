@@ -25,7 +25,8 @@ class Command(BaseModel):
 def read_root():
     return {"status": "C2 Server Running", "agents_online": len(active_agents)}
 
-# 1. Heartbeat: Agentul ne spune "Sunt viu!"
+
+/
 @app.post("/agent/heartbeat")
 def heartbeat(agent: AgentRegistration):
     agent_id = agent.hostname
