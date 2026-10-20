@@ -1,8 +1,10 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import os
 import time
 import socket
+import shlex
 
 from core.models import Target, TargetType, AuthConfig, AuthType
 from core.database import DatabaseManager
@@ -14,7 +16,7 @@ from modules.recon_nmap import NmapScanner
 from modules.web_sql import SQLMapScanner
 from modules.web_nikto import NiktoScanner
 from modules.msf_scanner import MetasploitScanner
-from modules.web_vigolium import VigoliumScanner
+from modules.web_vigolium import VigoliumScanner, _vigolium_bin
 
 # ==========================================================
 # INITIALIZARE
@@ -22,6 +24,7 @@ from modules.web_vigolium import VigoliumScanner
 db = DatabaseManager()
 MSF_PORT = 55553
 MSF_PASSWORD = "superparola123"
+VIGOLIUM_UI_PORT = 9002
 
 for key, default in {
     'last_results': [],
@@ -54,6 +57,19 @@ def start_msfrpcd(password=MSF_PASSWORD):
 def stop_msfrpcd():
     os.system("pkill -f msfrpcd")
     os.system("pkill -f ruby")
+
+
+def start_vigolium_server(vig_bin: str):
+    """Porneste interfata web nativa Vigolium (server mode) in fundal.
+    -A dezactiveaza autentificarea (ok local, legat de 127.0.0.1)."""
+    log = "/tmp/vigolium_server.log"
+    cmd = (f"nohup {shlex.quote(vig_bin)} server --host 127.0.0.1 "
+           f"--service-port {VIGOLIUM_UI_PORT} -A > {shlex.quote(log)} 2>&1 &")
+    os.system(cmd)
+
+
+def stop_vigolium_server():
+    os.system("pkill -f 'vigolium server'")
 
 
 @st.cache_data(show_spinner=False, ttl=120)
@@ -260,12 +276,13 @@ with st.sidebar:
 # ==========================================================
 # TABS
 # ==========================================================
-tab_recon, tab_assets, tab_msf, tab_web, tab_report = st.tabs([
+tab_recon, tab_assets, tab_msf, tab_web, tab_report, tab_vigui = st.tabs([
     "🌐 1. Recon (Nmap)",
     "🗂️ 2. Assets",
     "🦇 3. Metasploit",
     "🎯 4. Atac Web (+Auth)",
     "📊 5. Raportare",
+    "🧪 6. Vigolium UI",
 ])
 
 targets = db.get_all_targets()
@@ -670,3 +687,55 @@ with tab_report:
             st.download_button("⬇️ Export CSV", data=filtered.to_csv(index=False).encode("utf-8"),
                                file_name="vulnerabilitati.csv", mime="text/csv",
                                use_container_width=True)
+
+
+# ----------------------------------------------------------
+# TAB 6: INTERFATA NATIVA VIGOLIUM (inglobata prin iframe)
+# ----------------------------------------------------------
+with tab_vigui:
+    st.header("🧪 Vigolium — interfata nativa")
+    vig_bin = _vigolium_bin()
+
+    if not vig_bin:
+        st.error("Vigolium nu e instalat sau nu e in PATH. "
+                 "Instaleaza: `curl -fsSL https://vigolium.com/install.sh | bash`")
+    else:
+        running = is_port_in_use(VIGOLIUM_UI_PORT)
+        c1, c2 = st.columns([3, 1])
+        if running:
+            c1.success(f"🟢 Server Vigolium ONLINE pe http://localhost:{VIGOLIUM_UI_PORT}")
+            if c2.button("⏹️ Opreste", use_container_width=True):
+                stop_vigolium_server()
+                time.sleep(1)
+                st.rerun()
+        else:
+            c1.error("🔴 Server Vigolium OFFLINE")
+            if c2.button("🚀 Porneste", type="primary", use_container_width=True):
+                with st.spinner("Pornesc serverul Vigolium..."):
+                    start_vigolium_server(vig_bin)
+                    time.sleep(5)
+                st.rerun()
+
+        if running:
+            url = f"http://localhost:{VIGOLIUM_UI_PORT}/"
+            st.markdown(f"### 👉 [Deschide interfata Vigolium intr-un tab nou]({url})")
+            st.caption(
+                "Vigolium trimite `X-Frame-Options: DENY` (protectie anti-clickjacking), "
+                "deci interfata lor NU poate fi inglobata direct intr-un iframe. "
+                "Dashboard-ul nostru o porneste/opreste si o lanseaza; ea ruleaza local pe "
+                f"127.0.0.1:{VIGOLIUM_UI_PORT}.")
+            # Buton care deschide UI-ul in alt tab (JS, fiindca iframe-ul e interzis)
+            components.html(
+                f"""
+                <a href="{url}" target="_blank" rel="noopener"
+                   style="display:inline-block;padding:10px 18px;background:#2e86de;color:#fff;
+                          border-radius:8px;text-decoration:none;font-family:sans-serif;">
+                   🧪 Deschide Vigolium UI
+                </a>
+                """, height=60)
+            st.markdown("---")
+            st.markdown(f"- 🔎 Swagger / API: [http://localhost:{VIGOLIUM_UI_PORT}/swagger/](http://localhost:{VIGOLIUM_UI_PORT}/swagger/)")
+            st.markdown(f"- ❤️ Health: [http://localhost:{VIGOLIUM_UI_PORT}/health](http://localhost:{VIGOLIUM_UI_PORT}/health)")
+        else:
+            st.info("Porneste serverul ca sa lansezi interfata web nativa Vigolium "
+                    "(rezultate, trafic, API Swagger). Ruleaza local pe 127.0.0.1.")
