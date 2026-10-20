@@ -19,8 +19,8 @@ SEVERITY_MAP = {
     "unknown": Severity.INFO,
 }
 
-# Flag pentru headere custom. Majoritatea scannerelor Go (stil nuclei) folosesc -H.
-# DACA integrarea esueaza, verifica `vigolium scan --help` si corecteaza aici.
+# Confirmat din `vigolium scan --help`: headerele custom se dau cu -H / --header
+# (ex: -H "Authorization: Bearer token"). Cookie-ul il trimitem ca header Cookie.
 HEADER_FLAG = "-H"
 
 
@@ -29,8 +29,9 @@ class VigoliumScanner(BaseScannerModule):
     Integrare cu Vigolium (https://github.com/vigolium/vigolium) - scanner
     de vulnerabilitati web in Go, mod determinist "Native Scan".
 
-    Ruleaza:  vigolium scan -t <url> --strategy <s> --format jsonl -o <file> --silent
-    si parseaza output-ul JSONL in VulnerabilityResult.
+    Ruleaza:  vigolium scan -t <url> --strategy <s> --stateless --format jsonl
+              -o <file> --export-only findings --omit-response --silent
+    si parseaza envelope-ul JSONL ({type, data}) in VulnerabilityResult.
     """
     def __init__(self):
         super().__init__()
@@ -62,12 +63,19 @@ class VigoliumScanner(BaseScannerModule):
         os.close(out_fd)
 
         try:
+            # --scanning-max-duration opreste scanarea gratios inainte de
+            # kill-ul dur al subprocesului (lasam o marja de 30s)
+            max_dur = max(timeout - 30, 60)
             command = [
                 "vigolium", "scan",
                 "-t", target.input,
                 "--strategy", strategy,
+                "--stateless",                 # DB temporar, nu polueaza baza reala
                 "--format", "jsonl",
                 "-o", out_path,
+                "--export-only", "findings",   # envelope-ul contine DOAR findings
+                "--omit-response",             # fisier mai mic (fara body-urile HTTP)
+                "--scanning-max-duration", f"{max_dur}s",
                 "--silent",
             ]
 
@@ -105,10 +113,11 @@ class VigoliumScanner(BaseScannerModule):
         return results
 
     def _parse_jsonl(self, path: str) -> List[VulnerabilityResult]:
-        """Parseaza un fisier JSONL (un obiect JSON per linie) in rezultate.
+        """Parseaza fisierul JSONL Vigolium in rezultate.
 
-        Schema Vigolium nu e documentata exhaustiv, deci citim campurile
-        defensiv, cu mai multe denumiri posibile.
+        Vigolium scrie un envelope de forma {"type": "...", "data": {...}} pe
+        fiecare linie. Ne intereseaza doar inregistrarile de tip finding.
+        Tratam si cazul (mai putin probabil) al unui finding plat, ca fallback.
         """
         out: List[VulnerabilityResult] = []
         if not os.path.exists(path):
@@ -120,13 +129,24 @@ class VigoliumScanner(BaseScannerModule):
                 if not line:
                     continue
                 try:
-                    d = json.loads(line)
+                    obj = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if not isinstance(d, dict):
+                if not isinstance(obj, dict):
                     continue
 
-                # Ignoram liniile care sunt doar evenimente de progres, nu findings
+                # Envelope {type, data}: pastram doar findings
+                if "data" in obj and "type" in obj:
+                    if "finding" not in str(obj.get("type", "")).lower():
+                        continue
+                    d = obj["data"] if isinstance(obj["data"], dict) else {}
+                else:
+                    d = obj  # fallback: finding plat
+
+                if not d:
+                    continue
+
+                # Ignoram liniile care nu sunt findings (fara severitate si fara nume)
                 sev_raw = str(d.get("severity", "")).lower()
                 name = d.get("title") or d.get("name") or d.get("module") or d.get("template-id")
                 if not name and not sev_raw:
