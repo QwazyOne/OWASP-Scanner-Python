@@ -174,3 +174,132 @@ class WebAuthenticator:
         """Transforma sesiunea capturata intr-un AuthConfig de tip COOKIE,
         refolosibil direct de scannere."""
         return AuthConfig(auth_type=AuthType.COOKIE, cookie=self.cookie_string())
+
+
+class BrowserAuthenticator:
+    """
+    Login printr-un browser headless real (Playwright), pentru aplicatii
+    moderne/SPA unde login-ul se face din JavaScript. Dupa autentificare
+    extrage cookie-urile sesiunii, ca sa le refoloseasca SQLMap/Nikto.
+
+    Necesita: pip install playwright && python -m playwright install chromium
+    """
+    def __init__(self, timeout: int = 30):
+        self.timeout = timeout * 1000  # Playwright foloseste milisecunde
+        self.logged_in = False
+        self.log: List[str] = []
+        self._cookies: List[dict] = []
+
+    @staticmethod
+    def is_available() -> bool:
+        try:
+            import playwright  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    def authenticate(self, auth: AuthConfig) -> bool:
+        """Ruleaza login-ul intr-un thread dedicat: API-ul sync Playwright nu
+        poate rula intr-un thread care are deja un event loop asyncio (Streamlit)."""
+        import threading
+        result = {}
+
+        def _worker():
+            result["ok"] = self._do_login(auth)
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        t.join(timeout=(self.timeout / 1000) + 30)
+        if t.is_alive():
+            self.log.append("Login prin browser a depasit timpul alocat.")
+            return False
+        return result.get("ok", False)
+
+    def _do_login(self, auth: AuthConfig) -> bool:
+        if not auth.login_url:
+            self.log.append("Login prin browser necesita un URL de login.")
+            return False
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            self.log.append("Playwright nu e instalat: pip install playwright && "
+                            "python -m playwright install chromium")
+            return False
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                ctx = browser.new_context(ignore_https_errors=True)
+                page = ctx.new_page()
+
+                self.log.append(f"Deschid {auth.login_url} in browser headless...")
+                page.goto(auth.login_url, timeout=self.timeout)
+
+                # Selectoare: folosim ce a dat userul, altfel auto-detectam
+                user_sel = auth.user_selector or self._auto_user_selector(page)
+                pass_sel = auth.pass_selector or "input[type=password]"
+                submit_sel = auth.submit_selector or self._auto_submit_selector(page)
+
+                if auth.username and user_sel:
+                    page.fill(user_sel, auth.username)
+                    self.log.append(f"Completat user ('{user_sel}').")
+                if auth.password:
+                    page.fill(pass_sel, auth.password)
+                    self.log.append(f"Completat parola ('{pass_sel}').")
+
+                if submit_sel:
+                    page.click(submit_sel)
+                    self.log.append(f"Trimis formularul ('{submit_sel}').")
+                else:
+                    page.keyboard.press("Enter")
+                    self.log.append("Niciun buton submit gasit; am apasat Enter.")
+
+                try:
+                    page.wait_for_load_state("networkidle", timeout=self.timeout)
+                except Exception:
+                    pass
+
+                # Verificare login reusit
+                if auth.success_selector:
+                    self.logged_in = page.locator(auth.success_selector).count() > 0
+                else:
+                    body = (page.content() or "").lower()
+                    self.logged_in = any(h in body for h in LOGGED_IN_HINTS) \
+                        or page.url != auth.login_url
+
+                self._cookies = ctx.cookies()
+                self.log.append(f"URL dupa login: {page.url}")
+                self.log.append("Autentificare REUSITA." if self.logged_in
+                                else "Login incert - verifica selectoarele sau datele.")
+                browser.close()
+            return self.logged_in
+        except Exception as e:
+            self.log.append(f"Eroare Playwright: {e}")
+            return False
+
+    @staticmethod
+    def _auto_user_selector(page) -> Optional[str]:
+        for sel in ["input[type=email]",
+                    "input[name*=user i]", "input[name*=email i]", "input[name*=login i]",
+                    "input[id*=user i]", "input[type=text]"]:
+            try:
+                if page.locator(sel).count() > 0:
+                    return sel
+            except Exception:
+                continue
+        return None
+
+    @staticmethod
+    def _auto_submit_selector(page) -> Optional[str]:
+        for sel in ["button[type=submit]", "input[type=submit]",
+                    "button:has-text('Login')", "button:has-text('Sign in')",
+                    "button:has-text('Log in')"]:
+            try:
+                if page.locator(sel).count() > 0:
+                    return sel
+            except Exception:
+                continue
+        return None
+
+    def cookie_string(self) -> str:
+        return "; ".join(f"{c['name']}={c['value']}" for c in self._cookies)

@@ -7,7 +7,7 @@ import socket
 from core.models import Target, TargetType, AuthConfig, AuthType
 from core.database import DatabaseManager
 from core.report_generator import generate_pdf_bytes, generate_global_pdf_bytes
-from core.auth_session import WebAuthenticator
+from core.auth_session import WebAuthenticator, BrowserAuthenticator
 
 # --- IMPORTURI MODULE ---
 from modules.recon_nmap import NmapScanner
@@ -64,6 +64,76 @@ def fetch_msf_scanner_modules():
 
 
 # ==========================================================
+# CATALOG METASPLOIT (nume prietenoase + sugestii pe porturi)
+# ==========================================================
+MSF_PRESETS = {
+    "🔎 Recon general": [
+        ("scanner/portscan/tcp", "Scanare porturi TCP", "Descopera porturi deschise via MSF."),
+        ("scanner/discovery/udp_sweep", "UDP Sweep", "Descopera servicii UDP comune."),
+    ],
+    "🌐 HTTP / Web": [
+        ("scanner/http/http_version", "Versiune server web", "Afla versiunea serverului HTTP."),
+        ("scanner/http/title", "Titluri pagini", "Extrage titlul paginilor web."),
+        ("scanner/http/robots_txt", "robots.txt", "Cauta si citeste robots.txt."),
+        ("scanner/http/dir_scanner", "Scanare directoare", "Cauta directoare web comune."),
+        ("scanner/http/options", "Metode HTTP (OPTIONS)", "Afla metodele HTTP permise."),
+    ],
+    "🗂️ SMB (Windows)": [
+        ("scanner/smb/smb_version", "Versiune SMB / OS", "Detecteaza versiunea SMB si sistemul."),
+        ("scanner/smb/smb_enumshares", "Enumerare share-uri", "Listeaza folderele partajate SMB."),
+        ("scanner/smb/smb_ms17_010", "EternalBlue (MS17-010)", "Verifica vulnerabilitatea critica MS17-010."),
+    ],
+    "🔑 SSH": [
+        ("scanner/ssh/ssh_version", "Versiune SSH", "Detecteaza versiunea serverului SSH."),
+    ],
+    "📁 FTP": [
+        ("scanner/ftp/ftp_version", "Versiune FTP", "Detecteaza versiunea serverului FTP."),
+        ("scanner/ftp/anonymous", "FTP anonim", "Verifica daca e permis login anonim."),
+    ],
+    "🗄️ Baze de date": [
+        ("scanner/mysql/mysql_version", "Versiune MySQL", "Detecteaza versiunea MySQL."),
+        ("scanner/postgres/postgres_version", "Versiune PostgreSQL", "Detecteaza versiunea PostgreSQL."),
+    ],
+}
+
+# path -> (nume prietenos, descriere), construit din presets
+MSF_FRIENDLY = {path: (name, desc)
+                for mods in MSF_PRESETS.values()
+                for (path, name, desc) in mods}
+
+# port deschis -> module relevante sugerate
+MSF_PORT_SUGGESTIONS = {
+    80: ["scanner/http/http_version", "scanner/http/title", "scanner/http/robots_txt"],
+    443: ["scanner/http/http_version", "scanner/http/title"],
+    8080: ["scanner/http/http_version", "scanner/http/title", "scanner/http/dir_scanner"],
+    8443: ["scanner/http/http_version", "scanner/http/title"],
+    445: ["scanner/smb/smb_version", "scanner/smb/smb_enumshares", "scanner/smb/smb_ms17_010"],
+    139: ["scanner/smb/smb_version"],
+    22: ["scanner/ssh/ssh_version"],
+    21: ["scanner/ftp/ftp_version", "scanner/ftp/anonymous"],
+    3306: ["scanner/mysql/mysql_version"],
+    5432: ["scanner/postgres/postgres_version"],
+}
+
+
+def msf_label(path: str) -> str:
+    """Eticheta prietenoasa pentru un modul; fallback pe numele scurt."""
+    if path in MSF_FRIENDLY:
+        return f"{MSF_FRIENDLY[path][0]}  ·  {path}"
+    return path
+
+
+def suggest_msf_modules(ports) -> list:
+    """Sugereaza module pe baza porturilor deschise ale tintei."""
+    suggested = []
+    for p in ports:
+        for mod in MSF_PORT_SUGGESTIONS.get(p.get('port'), []):
+            if mod not in suggested:
+                suggested.append(mod)
+    return suggested
+
+
+# ==========================================================
 # HELPERS VULNERABILITATI
 # ==========================================================
 def get_severity_str(obj):
@@ -105,6 +175,7 @@ def build_auth_config(prefix: str) -> AuthConfig:
         "HTTP Basic Auth": AuthType.BASIC,
         "Headers custom (Bearer/API Key)": AuthType.HEADER,
         "Login prin formular": AuthType.FORM,
+        "Login prin browser (Playwright/SPA)": AuthType.BROWSER,
     }
     choice = st.selectbox("🔐 Autentificare", options=list(label_map.keys()), key=f"{prefix}_auth_sel")
     atype = label_map[choice]
@@ -123,6 +194,19 @@ def build_auth_config(prefix: str) -> AuthConfig:
         cfg.login_data = st.text_input("Date login (POST)", placeholder="username=admin&password=1234", key=f"{prefix}_ldata")
         st.caption("Alternativ, poti lipi direct un cookie autentificat mai jos.")
         cfg.cookie = st.text_input("Cookie (optional)", key=f"{prefix}_fcookie")
+    elif atype == AuthType.BROWSER:
+        from core.auth_session import BrowserAuthenticator
+        if not BrowserAuthenticator.is_available():
+            st.error("Playwright nu e instalat. Ruleaza: pip install playwright && python -m playwright install chromium")
+        cfg.login_url = st.text_input("URL pagina de login", placeholder="https://app/login", key=f"{prefix}_burl")
+        c1, c2 = st.columns(2)
+        cfg.username = c1.text_input("Utilizator", key=f"{prefix}_buser")
+        cfg.password = c2.text_input("Parola", type="password", key=f"{prefix}_bpass")
+        with st.expander("Selectoare CSS (optional - se auto-detecteaza daca le lasi goale)"):
+            cfg.user_selector = st.text_input("Selector camp utilizator", placeholder="input[name=username]", key=f"{prefix}_bus") or None
+            cfg.pass_selector = st.text_input("Selector camp parola", placeholder="input[type=password]", key=f"{prefix}_bps") or None
+            cfg.submit_selector = st.text_input("Selector buton submit", placeholder="button[type=submit]", key=f"{prefix}_bsub") or None
+            cfg.success_selector = st.text_input("Selector care apare DOAR dupa login", placeholder="a[href*=logout]", key=f"{prefix}_bsucc") or None
 
     return cfg
 
@@ -245,74 +329,101 @@ with tab_assets:
 # TAB 3: METASPLOIT
 # ----------------------------------------------------------
 with tab_msf:
-    st.header("🦇 Metasploit Framework")
+    st.header("🦇 Metasploit")
+
     if not msf_running:
-        st.warning("Metasploit RPC este OFFLINE. Porneste-l din bara laterala (🔌 Start MSF).")
+        st.warning("🔴 Metasploit RPC este OFFLINE.")
+        st.info("Apasa **🔌 Start MSF** din bara laterala stanga ca sa pornesti motorul. "
+                "Dureaza ~15 secunde, apoi revii aici.")
+    elif not targets:
+        st.info("Mai intai adauga o tinta cu un scan Nmap in **Tab 1 - Recon**.")
     else:
-        st.success("Conectat la msfrpcd.")
+        st.success("🟢 Conectat la Metasploit. Alege o tinta si bifeaza ce vrei sa verifici.")
 
-        st.subheader("🔎 Cautare module")
-        kw = st.text_input("Keyword (ex: smb, http, apache, ssh)", key="msf_kw")
-        if st.button("Cauta in Metasploit", disabled=not msf_running):
-            with st.spinner(f"Caut '{kw}' in Metasploit..."):
-                m = MetasploitScanner()
-                raw = m.search_modules(kw)
-                st.session_state['msf_search_raw'] = raw
-                st.session_state['msf_search_paths'] = m.extract_module_paths(raw)
+        sel_id = st.selectbox("🎯 Tinta", options=list(target_map.keys()),
+                              format_func=lambda x: target_map[x], key="msf_target")
+        sel_host = target_map[sel_id]
+        tgt_ports = db.get_ports_for_target(sel_id)
 
-        if st.session_state['msf_search_raw']:
-            with st.expander("Rezultate brute cautare", expanded=False):
-                st.code(st.session_state['msf_search_raw'], language="text")
+        chosen = []  # module alese (cai complete)
 
-        st.markdown("---")
-        st.subheader("▶️ Ruleaza un modul auxiliary pe o tinta")
-
-        if not targets:
-            st.info("Ai nevoie de cel putin o tinta (Tab 1) pentru a rula module.")
+        # --- 1. RECOMANDARI PE BAZA PORTURILOR ---
+        st.markdown("### ✨ Recomandat pentru aceasta tinta")
+        suggested = suggest_msf_modules(tgt_ports)
+        if suggested:
+            open_ports = [p['port'] for p in tgt_ports]
+            st.caption(f"Pe baza porturilor deschise gasite de Nmap: {open_ports}")
+            default_sel = st.multiselect(
+                "Verificari sugerate (bifate automat)", options=suggested,
+                default=suggested, format_func=msf_label, key="msf_suggested")
+            chosen.extend(default_sel)
         else:
-            sel_id = st.selectbox("Tinta", options=list(target_map.keys()),
-                                  format_func=lambda x: target_map[x], key="msf_target")
-            sel_host = target_map[sel_id]
+            st.caption("Nmap nu a gasit porturi care sa aiba verificari sugerate. "
+                       "Foloseste catalogul de mai jos.")
 
-            scanner_mods = fetch_msf_scanner_modules()
-            options = sorted(set(scanner_mods) | set(st.session_state['msf_search_paths']))
-            chosen = st.multiselect("Module de rulat", options=options,
-                                    help="Module auxiliary/scanner + orice ai gasit prin cautare.")
-            lhost = st.text_input("LHOST (optional, pentru module care au nevoie)", key="msf_lhost")
+        # --- 2. CATALOG PE CATEGORII ---
+        with st.expander("📚 Catalog verificari (pe categorii)", expanded=not suggested):
+            for category, mods in MSF_PRESETS.items():
+                st.markdown(f"**{category}**")
+                for path, name, desc in mods:
+                    if st.checkbox(f"{name} — _{desc}_", key=f"msf_cat_{path}"):
+                        if path not in chosen:
+                            chosen.append(path)
 
-            if st.button("🔥 Ruleaza modulele MSF", type="primary", disabled=not chosen):
-                results = []
-                m = MetasploitScanner()
-                for path in chosen:
-                    if "/" not in path:
-                        continue
-                    m_type, m_name = path.split("/", 1)
-                    # auxiliary/scanner/... -> type=auxiliary, name=scanner/...
-                    if m_type not in ("auxiliary", "exploit", "post"):
-                        m_type, m_name = "auxiliary", path
-                    with st.spinner(f"Rulez {path}..."):
-                        res = m.run(Target(input=sel_host, type=list(TargetType)[0]),
-                                    module_type=m_type, module_name=m_name,
-                                    lhost=lhost or None)
-                        results.extend(res)
+        # --- 3. CAUTARE AVANSATA ---
+        with st.expander("🔍 Cautare avansata in Metasploit"):
+            kw = st.text_input("Keyword (ex: apache, tomcat, wordpress)", key="msf_kw")
+            if st.button("Cauta", disabled=not kw):
+                with st.spinner(f"Caut '{kw}'..."):
+                    m = MetasploitScanner()
+                    raw = m.search_modules(kw)
+                    st.session_state['msf_search_raw'] = raw
+                    st.session_state['msf_search_paths'] = m.extract_module_paths(raw)
+            if st.session_state['msf_search_paths']:
+                extra = st.multiselect("Module gasite", options=st.session_state['msf_search_paths'],
+                                       key="msf_found")
+                chosen.extend(m for m in extra if m not in chosen)
 
-                saved = 0
-                for r in results:
-                    if is_valid_vuln(r):
-                        db.add_vulnerability(sel_id, str(r.tool_used), r.name, get_severity_str(r), r.description)
-                        saved += 1
-                st.session_state['last_results'] = [
-                    {"Tool": r.tool_used, "Nume": r.name, "Descriere": r.description, "Severitate": get_severity_str(r)}
-                    for r in results
-                ]
-                st.toast(f"MSF finalizat. {saved} rezultate confirmate salvate.", icon="✅")
-                st.rerun()
+        # --- RULARE ---
+        st.markdown("---")
+        lhost = st.text_input("LHOST (doar pentru module care cer IP-ul tau; optional)", key="msf_lhost")
+        st.caption(f"Vei rula **{len(chosen)}** verificari pe **{sel_host}**.")
+
+        if st.button("🔥 Ruleaza verificarile selectate", type="primary", disabled=not chosen,
+                     use_container_width=True):
+            results = []
+            m = MetasploitScanner()
+            prog = st.progress(0.0)
+            for i, path in enumerate(chosen, 1):
+                if "/" not in path:
+                    continue
+                m_type, m_name = path.split("/", 1)
+                if m_type not in ("auxiliary", "exploit", "post"):
+                    m_type, m_name = "auxiliary", path
+                with st.spinner(f"[{i}/{len(chosen)}] {msf_label(path)}..."):
+                    res = m.run(Target(input=sel_host, type=list(TargetType)[0]),
+                                module_type=m_type, module_name=m_name, lhost=lhost or None)
+                    results.extend(res)
+                prog.progress(i / len(chosen))
+
+            saved = 0
+            for r in results:
+                if is_valid_vuln(r):
+                    db.add_vulnerability(sel_id, str(r.tool_used), r.name, get_severity_str(r), r.description)
+                    saved += 1
+            st.session_state['last_results'] = [
+                {"Tool": r.tool_used, "Nume": r.name, "Descriere": r.description, "Severitate": get_severity_str(r)}
+                for r in results
+            ]
+            st.toast(f"Gata! {saved} rezultate confirmate salvate in raport.", icon="✅")
+            st.rerun()
 
         if st.session_state['last_results']:
             st.markdown("---")
-            st.subheader("📋 Ultimele rezultate")
+            st.subheader("📋 Rezultate")
             for item in st.session_state['last_results']:
-                with st.expander(f"👁️ {item['Nume']} ({str(item['Tool']).upper()}) — {item['Severitate']}"):
+                icon = "🔴" if item['Severitate'] in ("HIGH", "CRITICAL") else "⚪"
+                with st.expander(f"{icon} {item['Nume']} — {item['Severitate']}"):
                     st.code(item['Descriere'], language="text")
 
 
@@ -361,7 +472,10 @@ with tab_web:
             auth_cfg = build_auth_config("web")
             if st.button("🔑 Login & captureaza sesiunea", use_container_width=True):
                 with st.spinner("Ma autentific in aplicatie..."):
-                    authn = WebAuthenticator(verify_ssl=False)
+                    if auth_cfg.auth_type == AuthType.BROWSER:
+                        authn = BrowserAuthenticator()
+                    else:
+                        authn = WebAuthenticator(verify_ssl=False)
                     ok = authn.authenticate(auth_cfg)
                 st.code("\n".join(authn.log), language="text")
                 if ok and authn.cookie_string():
@@ -447,7 +561,39 @@ with tab_web:
 # TAB 5: RAPORTARE AGREGATA
 # ----------------------------------------------------------
 with tab_report:
-    st.header("📊 Raportare consolidata")
+    st.header("📊 Raportare")
+
+    # --- RAPORT PER TINTA ---
+    st.subheader("🎯 Raport pentru o tinta")
+    if not targets:
+        st.info("Nicio tinta disponibila.")
+    else:
+        r_id = st.selectbox("Selecteaza tinta", options=list(target_map.keys()),
+                            format_func=lambda x: f"{target_map[x]} ({len(db.get_vulnerabilities_for_target(x))} vulns)",
+                            key="report_target")
+        r_host = target_map[r_id]
+        r_vulns = db.get_vulnerabilities_for_target(r_id)
+
+        if r_vulns:
+            st.dataframe(pd.DataFrame(r_vulns)[["tool", "name", "severity", "timestamp"]],
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("Aceasta tinta nu are vulnerabilitati salvate.")
+
+        rc1, rc2 = st.columns(2)
+        with rc1:
+            tgt_pdf = generate_pdf_bytes(db, r_id)
+            st.download_button("📄 Genereaza raport PDF (aceasta tinta)", data=tgt_pdf,
+                               file_name=f"Raport_{r_host}.pdf", mime="application/pdf",
+                               use_container_width=True, type="primary", key="rep_pdf_target")
+        with rc2:
+            csv_target = pd.DataFrame(r_vulns).to_csv(index=False).encode("utf-8") if r_vulns else b""
+            st.download_button("⬇️ Export CSV (aceasta tinta)", data=csv_target,
+                               file_name=f"{r_host}_vulns.csv", mime="text/csv",
+                               use_container_width=True, disabled=not r_vulns, key="rep_csv_target")
+
+    st.markdown("---")
+    st.subheader("🌐 Raport consolidat (toate tintele)")
 
     # Agregam toate vulnerabilitatile
     all_rows = []
