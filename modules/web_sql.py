@@ -1,7 +1,8 @@
 import subprocess
 from typing import List
+from typing import Optional
 from modules.base import BaseScannerModule
-from core.models import Target, VulnerabilityResult, Severity
+from core.models import Target, VulnerabilityResult, Severity, AuthConfig, AuthType
 
 class SQLMapScanner(BaseScannerModule):
     def __init__(self):
@@ -14,7 +15,8 @@ class SQLMapScanner(BaseScannerModule):
         from shutil import which
         return which("sqlmap") is not None
     
-    def run(self, target: Target, level: int = 1, risk: int = 1) -> List[VulnerabilityResult]:
+    def run(self, target: Target, level: int = 1, risk: int = 1,
+            auth: Optional[AuthConfig] = None) -> List[VulnerabilityResult]:
         self.log(f"Testing {target.input} for SQL Injection...", level="info")
         results = []
 
@@ -25,14 +27,33 @@ class SQLMapScanner(BaseScannerModule):
         try:
             # Adăugăm --batch și --fail-fast (se oprește la prima eroare/succes ca să fie mai rapid)
             command = [
-                "sqlmap", 
-                "-u", target.input, 
-                "--batch", 
+                "sqlmap",
+                "-u", target.input,
+                "--batch",
                 "--dbs",
                 f"--level={level}",
                 f"--risk={risk}"
             ]
-            
+
+            # --- AUTENTIFICARE PE APLICATII WEB PROTEJATE ---
+            if auth and auth.is_active():
+                if auth.auth_type == AuthType.COOKIE and auth.cookie:
+                    command.extend(["--cookie", auth.cookie])
+                elif auth.auth_type == AuthType.BASIC and auth.username:
+                    command.extend(["--auth-type", "Basic",
+                                    "--auth-cred", f"{auth.username}:{auth.password or ''}"])
+                elif auth.auth_type == AuthType.HEADER and auth.headers:
+                    # SQLMap accepta mai multe headere separate prin '\n'
+                    joined = "\\n".join(l.strip() for l in auth.headers.splitlines() if l.strip())
+                    command.extend(["--headers", joined])
+                elif auth.auth_type == AuthType.FORM:
+                    # Login automat prin formular inainte de scanare
+                    if auth.login_url and auth.login_data:
+                        command.extend(["--auth-url", auth.login_url,
+                                        "--auth-data", auth.login_data])
+                    elif auth.cookie:
+                        command.extend(["--cookie", auth.cookie])
+
             # Folosim PIPE pentru a capta tot
             process = subprocess.run(command, capture_output=True, text=True)
             output = process.stdout + process.stderr # Combinăm erorile cu output-ul standard

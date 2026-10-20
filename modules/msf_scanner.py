@@ -133,24 +133,43 @@ class MetasploitScanner(BaseScannerModule):
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             clean_text = ansi_escape.sub('', raw_output)
 
-            useful_lines = []
+            # Clasificam liniile dupa markerul Metasploit:
+            #   [+] = constatare pozitiva (vulnerabil / confirmat)
+            #   [*] = informativ / status
+            #   [-] = esec / negativ
+            positive_lines, info_lines, negative_lines = [], [], []
             for line in clean_text.split('\n'):
-                if "[+]" in line or "[*]" in line or "[-]" in line:
-                    if "msf6" not in line and "execution completed" not in line:
-                        useful_lines.append(line.strip())
+                stripped = line.strip()
+                if not stripped or "msf6" in stripped or "execution completed" in stripped:
+                    continue
+                if "[+]" in stripped:
+                    positive_lines.append(stripped)
+                elif "[*]" in stripped:
+                    info_lines.append(stripped)
+                elif "[-]" in stripped:
+                    negative_lines.append(stripped)
 
-            final_details = "\n".join(useful_lines)
-            
-            if not final_details:
-                # Dacă nu avem output standard cu [*], afișăm totuși ce s-a printat pe ecran curățat
-                final_details = clean_text.strip() if clean_text.strip() else f"Modulul a rulat complet, dar nu a detectat/returnat informații."
+            short_name = module_name.split('/')[-1]
 
-            vuln = VulnerabilityResult(
-                name=f"MSF: {module_name.split('/')[-1]}", 
-                description=final_details,
-                severity=Severity.INFO if "[-]" not in final_details else Severity.LOW,
-                tool_used="metasploit"
-            )
+            if positive_lines:
+                # Avem confirmari reale -> vulnerabilitate / finding
+                vuln = VulnerabilityResult(
+                    name=f"MSF: {short_name} (CONFIRMAT)",
+                    description="\n".join(positive_lines),
+                    severity=Severity.HIGH,
+                    tool_used="metasploit",
+                )
+            else:
+                # Doar status [*] si/sau esecuri [-] -> niciun rezultat pozitiv
+                summary = "\n".join(negative_lines or info_lines) or \
+                    "Modulul a rulat complet, dar nu a detectat nimic pozitiv ([+] lipseste)."
+                vuln = VulnerabilityResult(
+                    name=f"MSF: {short_name} (fara rezultat)",
+                    description=summary,
+                    severity=Severity.INFO,
+                    tool_used="metasploit",
+                )
+
             results.append(vuln)
             self.log(f"MSF {module_name} execution finished!", level="success")
 
