@@ -14,6 +14,7 @@ from modules.recon_nmap import NmapScanner
 from modules.web_sql import SQLMapScanner
 from modules.web_nikto import NiktoScanner
 from modules.msf_scanner import MetasploitScanner
+from modules.web_vigolium import VigoliumScanner
 
 # ==========================================================
 # INITIALIZARE
@@ -160,6 +161,9 @@ def is_valid_vuln(obj):
     if "nikto" in tool:
         # Modulul Nikto filtreaza deja banner-ul; salvam orice constatare reala
         return len(desc.strip()) > 0
+    if "vigolium" in tool:
+        # Vigolium filtreaza evenimentele la parsare; salvam orice finding cu continut
+        return len(desc.strip()) > 0
     if "sqlmap" in tool:
         if hasattr(obj.severity, 'name'):
             return obj.severity.name != "INFO"
@@ -235,7 +239,7 @@ with st.sidebar:
                 time.sleep(15)
             st.rerun()
 
-    for tool, label in [("nmap", "Nmap"), ("nikto", "Nikto"), ("sqlmap", "SQLMap")]:
+    for tool, label in [("nmap", "Nmap"), ("nikto", "Nikto"), ("sqlmap", "SQLMap"), ("vigolium", "Vigolium")]:
         from shutil import which
         ok = which(tool) is not None
         st.write(f"{'🟢' if ok else '🔴'} {label}: {'instalat' if ok else 'lipsa'}")
@@ -511,6 +515,11 @@ with tab_web:
             sql_level = col_s2.number_input("Level", 1, 5, 1)
             sql_risk = col_s3.number_input("Risk", 1, 3, 1)
 
+            st.markdown("#### Vigolium — scanner web modern (Native Scan)")
+            run_vigolium = st.checkbox("Ruleaza Vigolium", value=False)
+            vig_strategy = st.selectbox("Strategie Vigolium", ["lite", "balanced", "deep"], index=1)
+            st.caption(f"Tinta Vigolium: `{base_url}`")
+
             submit_pipeline = st.form_submit_button("🔥 LANSEAZA PIPELINE-UL", type="primary", use_container_width=True)
 
         if submit_pipeline:
@@ -531,6 +540,13 @@ with tab_web:
                     pipeline_results.extend(res_sql)
             elif run_sqlmap and not sql_path:
                 st.error("Ai bifat SQLMap dar nu ai oferit o cale.")
+
+            if run_vigolium:
+                with st.spinner(f"🧪 Vigolium ({vig_strategy}) scaneaza {base_url}..."):
+                    res_vig = VigoliumScanner().run(
+                        Target(input=base_url, type=list(TargetType)[0]),
+                        strategy=vig_strategy, auth=effective_auth)
+                    pipeline_results.extend(res_vig)
 
             saved = 0
             for r in pipeline_results:

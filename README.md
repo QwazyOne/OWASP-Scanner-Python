@@ -49,6 +49,11 @@ curl https://raw.githubusercontent.com/rapid7/metasploit-omnibus/master/config/t
 chmod +x /tmp/msfinstall && sudo /tmp/msfinstall
 ```
 
+**Vigolium** (opțional) — scanner web modern în Go, din installer-ul oficial:
+```bash
+curl -fsSL https://vigolium.com/install.sh | bash
+```
+
 ### 3. Proiectul
 ```bash
 git clone <URL-REPO>
@@ -109,7 +114,7 @@ Interfața are 5 tab-uri:
 | **1. Recon (Nmap)** | Scanare porturi (fast / deep / service detection) + scripturi `vuln` NSE. Rezultatele se salvează în baza de date. |
 | **2. Assets** | Toate țintele scanate, porturile și vulnerabilitățile salvate; raport PDF și ștergere per țintă. |
 | **3. Metasploit** | Status + start/stop daemon. Recomandări de module pe baza porturilor găsite de Nmap, catalog de verificări cu nume prietenoase pe categorii, căutare avansată. |
-| **4. Atac Web (+Auth)** | Nikto + SQLMap cu **autentificare**: cookie, Basic, headers, login prin formular (auto-CSRF) și login prin browser headless (Playwright, pentru aplicații SPA/JS). Sesiunea se capturează și se refolosește automat. |
+| **4. Atac Web (+Auth)** | Nikto + SQLMap + **Vigolium** cu **autentificare**: cookie, Basic, headers, login prin formular (auto-CSRF) și login prin browser headless (Playwright, pentru aplicații SPA/JS). Sesiunea se capturează și se refolosește automat. |
 | **5. Raportare** | Raport PDF/CSV per-țintă selectabilă + raport consolidat pe toate țintele, cu filtre pe severitate și tool. |
 
 ### Metasploit RPC
@@ -137,6 +142,7 @@ cu parola setată în `dashboard.py` (`MSF_PASSWORD`). Pe unele instalări poate
     ├── recon_nmap.py       # Nmap
     ├── web_nikto.py        # Nikto (cu suport SSL + cookie)
     ├── web_sql.py          # SQLMap (cu autentificare)
+    ├── web_vigolium.py     # Vigolium (Native Scan, JSONL)
     └── msf_scanner.py      # Integrare Metasploit RPC
 ```
 
