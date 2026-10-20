@@ -14,6 +14,7 @@ SEVERITY_MAP = {
     "high": Severity.HIGH,
     "medium": Severity.MEDIUM,
     "low": Severity.LOW,
+    "suspect": Severity.INFO,   # semnal slab, sub 'low' in scara Vigolium
     "info": Severity.INFO,
     "informational": Severity.INFO,
     "unknown": Severity.INFO,
@@ -148,26 +149,48 @@ class VigoliumScanner(BaseScannerModule):
 
                 # Ignoram liniile care nu sunt findings (fara severitate si fara nume)
                 sev_raw = str(d.get("severity", "")).lower()
-                name = d.get("title") or d.get("name") or d.get("module") or d.get("template-id")
+                # Nume prietenos: module_name e cel mai descriptiv in Vigolium
+                name = (d.get("module_name") or d.get("module_id")
+                        or d.get("title") or d.get("name") or d.get("module"))
                 if not name and not sev_raw:
                     continue
 
                 severity = SEVERITY_MAP.get(sev_raw, Severity.INFO)
 
-                url = d.get("url") or d.get("matched_at") or d.get("host") or ""
+                # URL: 'url' e string; 'matched_at' e o LISTA de URL-uri
+                url = d.get("url") or ""
+                if not url:
+                    ma = d.get("matched_at")
+                    if isinstance(ma, list) and ma:
+                        url = str(ma[0])
+                    elif isinstance(ma, str):
+                        url = ma
+                url = url or d.get("hostname") or ""
+
                 param = d.get("parameter") or d.get("param") or ""
-                evidence = d.get("evidence") or d.get("extracted") or ""
+
+                # Evidenta: 'extracted_results' e o lista in Vigolium
+                ev = d.get("extracted_results") or d.get("evidence") or d.get("extracted") or ""
+                if isinstance(ev, list):
+                    ev = ", ".join(str(x) for x in ev)
+
                 desc = d.get("description") or ""
+                confidence = d.get("confidence") or ""
+                cvss = d.get("cvss_score")
 
                 parts = []
                 if url:
                     parts.append(f"URL: {url}")
                 if param:
                     parts.append(f"Parametru: {param}")
+                if confidence:
+                    parts.append(f"Incredere: {confidence}")
+                if cvss:
+                    parts.append(f"CVSS: {cvss}")
                 if desc:
                     parts.append(desc)
-                if evidence:
-                    parts.append(f"Evidenta: {evidence}")
+                if ev:
+                    parts.append(f"Evidenta: {ev}")
                 description = "\n".join(parts) or json.dumps(d)[:800]
 
                 out.append(VulnerabilityResult(
