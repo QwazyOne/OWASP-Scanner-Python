@@ -25,6 +25,32 @@ class Target(BaseModel):
     output_dir: Optional[str] = "reports"
 # -----------------------------------
 
+# Configurare autentificare pentru scanarea aplicatiilor web protejate
+class AuthType(str, Enum):
+    NONE = "none"
+    COOKIE = "cookie"
+    BASIC = "basic"
+    HEADER = "header"
+    FORM = "form"
+    BROWSER = "browser"       # login real intr-un browser headless (Playwright) - SPA/JS
+
+class AuthConfig(BaseModel):
+    auth_type: AuthType = AuthType.NONE
+    username: Optional[str] = None
+    password: Optional[str] = None
+    cookie: Optional[str] = None          # ex: "PHPSESSID=abc; token=xyz"
+    headers: Optional[str] = None         # linii "Nume: valoare", una per rand
+    login_url: Optional[str] = None       # pagina care primeste POST-ul de login
+    login_data: Optional[str] = None      # ex: "user=admin&pass=1234"
+    # Selectoare CSS optionale pentru login prin browser (auto-detectate daca lipsesc)
+    user_selector: Optional[str] = None
+    pass_selector: Optional[str] = None
+    submit_selector: Optional[str] = None
+    success_selector: Optional[str] = None  # element care apare DOAR dupa login reusit
+
+    def is_active(self) -> bool:
+        return self.auth_type != AuthType.NONE
+
 # Asta este structura unică a unei vulnerabilități găsite
 class VulnerabilityResult(BaseModel):
     name: str                   

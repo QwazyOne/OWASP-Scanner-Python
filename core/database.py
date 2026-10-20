@@ -39,6 +39,16 @@ class DatabaseManager:
                 timestamp TEXT,
                 FOREIGN KEY(target_id) REFERENCES targets(id)
             )''')
+
+        # Sesiunea web autentificata capturata pentru o tinta (cookie + context)
+        cursor.execute('''CREATE TABLE IF NOT EXISTS sessions (
+                target_id INTEGER PRIMARY KEY,
+                cookie TEXT,
+                base_url TEXT,
+                login_url TEXT,
+                created TEXT,
+                FOREIGN KEY(target_id) REFERENCES targets(id)
+            )''')
         conn.commit()
         conn.close()
 
@@ -111,6 +121,40 @@ class DatabaseManager:
         conn.close()
         return [{"tool": r[0], "name": r[1], "severity": r[2], "details": r[3], "timestamp": r[4]} for r in rows]
         
+    # --- SESIUNE AUTENTIFICATA ---
+    def save_session(self, target_id: int, cookie: str, base_url: str = "", login_url: str = ""):
+        """Salveaza (sau actualizeaza) sesiunea autentificata pentru o tinta."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute('''
+            INSERT INTO sessions (target_id, cookie, base_url, login_url, created)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(target_id) DO UPDATE SET
+                cookie=excluded.cookie, base_url=excluded.base_url,
+                login_url=excluded.login_url, created=excluded.created
+        ''', (target_id, cookie, base_url, login_url, now))
+        conn.commit()
+        conn.close()
+
+    def get_session(self, target_id: int):
+        """Returneaza sesiunea salvata pentru o tinta, sau None."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT cookie, base_url, login_url, created FROM sessions WHERE target_id = ?', (target_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            return None
+        return {"cookie": row[0], "base_url": row[1], "login_url": row[2], "created": row[3]}
+
+    def delete_session(self, target_id: int):
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM sessions WHERE target_id = ?', (target_id,))
+        conn.commit()
+        conn.close()
+
     # --- ȘTERGERE ---
     def delete_target(self, target_id: int):
         """Șterge un proiect (ținta) și toate datele asociate (porturi, vulns)."""
@@ -119,6 +163,7 @@ class DatabaseManager:
         # Ștergem în cascadă ca să nu lăsăm "gunoi" în baza de date
         cursor.execute('DELETE FROM ports WHERE target_id = ?', (target_id,))
         cursor.execute('DELETE FROM vulnerabilities WHERE target_id = ?', (target_id,))
+        cursor.execute('DELETE FROM sessions WHERE target_id = ?', (target_id,))
         cursor.execute('DELETE FROM targets WHERE id = ?', (target_id,))
         conn.commit()
         conn.close()

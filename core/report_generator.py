@@ -81,7 +81,7 @@ def generate_pdf_bytes(db_manager, target_id: int) -> bytes:
     summary_text = f"In urma testelor asupra {target_info['host']}, s-au identificat {len(vulns)} vulnerabilitati."
     if crit_count > 0:
         summary_text += " ATENTIE: Au fost detectate probleme CRITICE care necesita remediere imediata."
-    pdf.multi_cell(0, 6, clean_text(summary_text))
+    pdf.multi_cell(0, 6, clean_text(summary_text), new_x="LMARGIN", new_y="NEXT")
     pdf.ln(5)
 
     # 3. PORTURI
@@ -122,14 +122,93 @@ def generate_pdf_bytes(db_manager, target_id: int) -> bytes:
             pdf.set_text_color(0, 0, 0)
             
             pdf.set_font("Helvetica", "I", 9)
-            pdf.multi_cell(0, 5, clean_text(f"Detalii: {v['details']}"))
+            pdf.multi_cell(0, 5, clean_text(f"Detalii: {v['details']}"), wrapmode="CHAR", new_x="LMARGIN", new_y="NEXT")
             
             pdf.ln(2)
             pdf.set_font("Helvetica", "B", 9)
             pdf.set_text_color(46, 139, 87)
             remed = get_remediation(v['name'], v['tool'])
-            pdf.multi_cell(0, 5, clean_text(remed))
+            pdf.multi_cell(0, 5, clean_text(remed), new_x="LMARGIN", new_y="NEXT")
             pdf.set_text_color(0, 0, 0)
             pdf.ln(5)
+
+    return bytes(pdf.output())
+
+
+def generate_global_pdf_bytes(db_manager) -> bytes:
+    """Raport agregat: toate vulnerabilitatile din toate tintele scanate."""
+    targets = db_manager.get_all_targets()
+
+    pdf = AuditReportPDF()
+    pdf.alias_nb_pages()
+    pdf.add_page()
+
+    # 1. REZUMAT GLOBAL
+    sev_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]
+    counts = {s: 0 for s in sev_order}
+    total_vulns = 0
+    for t in targets:
+        for v in db_manager.get_vulnerabilities_for_target(t['id']):
+            total_vulns += 1
+            sev = str(v['severity']).upper()
+            counts[sev] = counts.get(sev, 0) + 1
+
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, clean_text("1. Rezumat Executiv Global"), ln=True)
+    pdf.set_font("Helvetica", "", 11)
+    pdf.multi_cell(0, 6, clean_text(
+        f"Au fost analizate {len(targets)} tinte, identificand in total {total_vulns} "
+        f"vulnerabilitati. Distributia pe severitate este prezentata mai jos."),
+        new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(3)
+
+    # Tabel distributie severitate
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(60, 8, "Severitate", border=1, align="C")
+    pdf.cell(40, 8, "Numar", border=1, align="C")
+    pdf.ln()
+    pdf.set_font("Helvetica", "", 10)
+    colors = {"CRITICAL": (200, 0, 0), "HIGH": (255, 100, 0),
+              "MEDIUM": (230, 180, 0), "LOW": (46, 139, 87), "INFO": (100, 100, 100)}
+    for s in sev_order:
+        r, g, b = colors[s]
+        pdf.set_text_color(r, g, b)
+        pdf.cell(60, 8, s, border=1, align="L")
+        pdf.cell(40, 8, str(counts.get(s, 0)), border=1, align="C")
+        pdf.ln()
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(5)
+
+    # 2. DETALII PE FIECARE TINTA
+    pdf.set_font("Helvetica", "B", 14)
+    pdf.cell(0, 10, clean_text("2. Constatari pe Tinte"), ln=True)
+    pdf.ln(2)
+
+    for t in targets:
+        vulns = db_manager.get_vulnerabilities_for_target(t['id'])
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_fill_color(41, 128, 185)
+        pdf.set_text_color(255, 255, 255)
+        pdf.cell(0, 8, clean_text(f"Tinta: {t['host']}  ({len(vulns)} vulnerabilitati)"),
+                 ln=True, fill=True)
+        pdf.set_text_color(0, 0, 0)
+
+        if not vulns:
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.cell(0, 6, "Nu s-au identificat vulnerabilitati confirmate.", ln=True)
+            pdf.ln(3)
+            continue
+
+        for idx, v in enumerate(vulns, 1):
+            pdf.set_font("Helvetica", "B", 10)
+            sev = str(v['severity']).upper()
+            r, g, b = colors.get(sev, (0, 0, 0))
+            pdf.set_text_color(r, g, b)
+            pdf.multi_cell(0, 6, clean_text(f"[{sev}] {idx}. {v['name']} ({v['tool']})"), wrapmode="CHAR", new_x="LMARGIN", new_y="NEXT")
+            pdf.set_text_color(0, 0, 0)
+            pdf.set_font("Helvetica", "I", 9)
+            pdf.multi_cell(0, 5, clean_text(f"Detalii: {str(v['details'])[:600]}"), wrapmode="CHAR", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(2)
+        pdf.ln(3)
 
     return bytes(pdf.output())
