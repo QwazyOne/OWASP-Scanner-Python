@@ -25,6 +25,19 @@ SEVERITY_MAP = {
 HEADER_FLAG = "-H"
 
 
+def _vigolium_bin() -> Optional[str]:
+    """Gaseste binarul vigolium, inclusiv in ~/.local/bin (installer-ul oficial
+    pune acolo, iar Streamlit poate porni fara ~/.local/bin in PATH)."""
+    found = shutil.which("vigolium")
+    if found:
+        return found
+    for cand in [os.path.expanduser("~/.local/bin/vigolium"),
+                 "/usr/local/bin/vigolium", "/usr/bin/vigolium"]:
+        if os.path.isfile(cand) and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 class VigoliumScanner(BaseScannerModule):
     """
     Integrare cu Vigolium (https://github.com/vigolium/vigolium) - scanner
@@ -41,16 +54,19 @@ class VigoliumScanner(BaseScannerModule):
         self.required_tools = ["vigolium"]
 
     def check_prerequisites(self) -> bool:
-        if shutil.which("vigolium") is not None:
+        if _vigolium_bin() is not None:
             return True
-        self.log("Vigolium nu este instalat! Ruleaza: curl -fsSL https://vigolium.com/install.sh | bash",
-                 level="error")
+        self.log("Vigolium nu este instalat sau nu e in PATH! "
+                 "Instaleaza: curl -fsSL https://vigolium.com/install.sh | bash "
+                 "(binarul ajunge in ~/.local/bin)", level="error")
         return False
 
     def run(self, target: Target, strategy: str = "balanced",
             auth: Optional[AuthConfig] = None, timeout: int = 600) -> List[VulnerabilityResult]:
         results: List[VulnerabilityResult] = []
-        if not self.check_prerequisites():
+        vig = _vigolium_bin()
+        if not vig:
+            self.check_prerequisites()  # logheaza mesajul de eroare
             return results
 
         if not target.input.startswith(("http://", "https://")):
@@ -60,15 +76,17 @@ class VigoliumScanner(BaseScannerModule):
         if strategy not in ("lite", "balanced", "deep"):
             strategy = "balanced"
 
-        out_fd, out_path = tempfile.mkstemp(prefix="vigolium_", suffix=".jsonl")
-        os.close(out_fd)
+        # Folosim un director temporar cu un fisier INEXISTENT (ca in terminal);
+        # un fisier pre-creat putea deruta scrierea output-ului.
+        out_dir = tempfile.mkdtemp(prefix="vigolium_")
+        out_path = os.path.join(out_dir, "findings.jsonl")
 
         try:
             # --scanning-max-duration opreste scanarea gratios inainte de
             # kill-ul dur al subprocesului (lasam o marja de 30s)
             max_dur = max(timeout - 30, 60)
             command = [
-                "vigolium", "scan",
+                vig, "scan",
                 "-t", target.input,
                 "--strategy", strategy,
                 "--stateless",                 # DB temporar, nu polueaza baza reala
@@ -95,7 +113,15 @@ class VigoliumScanner(BaseScannerModule):
                     command.extend([HEADER_FLAG, f"Authorization: Basic {token}"])
 
             self.log(f"Rulez Vigolium ({strategy}) pe {target.input}...", level="info")
-            subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+
+            # Pentru diagnostic: daca nu apare niciun output, pastram stderr-ul
+            if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+                tail = (proc.stderr or proc.stdout or "").strip()[-400:]
+                if proc.returncode != 0:
+                    self.log(f"Vigolium a iesit cu cod {proc.returncode}. {tail}", level="error")
+                else:
+                    self.log(f"Vigolium nu a scris rezultate. {tail}", level="error")
 
             results = self._parse_jsonl(out_path)
             self.log(f"Vigolium a raportat {len(results)} constatari.", level="success")
@@ -105,11 +131,11 @@ class VigoliumScanner(BaseScannerModule):
         except Exception as e:
             self.log(f"Eroare la executia Vigolium: {e}", level="error")
         finally:
-            if os.path.exists(out_path):
-                try:
-                    os.remove(out_path)
-                except OSError:
-                    pass
+            try:
+                import shutil as _sh
+                _sh.rmtree(out_dir, ignore_errors=True)
+            except Exception:
+                pass
 
         return results
 

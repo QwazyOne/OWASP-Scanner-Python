@@ -239,9 +239,10 @@ with st.sidebar:
                 time.sleep(15)
             st.rerun()
 
+    from shutil import which
+    from modules.web_vigolium import _vigolium_bin
     for tool, label in [("nmap", "Nmap"), ("nikto", "Nikto"), ("sqlmap", "SQLMap"), ("vigolium", "Vigolium")]:
-        from shutil import which
-        ok = which(tool) is not None
+        ok = (_vigolium_bin() is not None) if tool == "vigolium" else (which(tool) is not None)
         st.write(f"{'🟢' if ok else '🔴'} {label}: {'instalat' if ok else 'lipsa'}")
 
     st.markdown("---")
@@ -448,15 +449,20 @@ with tab_web:
                      if p['port'] in [80, 443, 8000, 8080, 8443]
                      or 'http' in str(p.get('service') or '').lower()]
 
-        base_url = ""
+        # Ghicim un URL de pornire din porturile Nmap, dar lasam campul EDITABIL
+        # (hostul din DB nu are port; tinte ca :4280 trebuie corectate manual).
         if web_ports:
             st.success(f"🌐 Servicii WEB detectate pe porturile: **{web_ports}**")
             port_to_use = web_ports[0]
             protocol = "https" if port_to_use in [443, 8443] else "http"
-            base_url = f"{protocol}://{sel_host}" if port_to_use in [80, 443] else f"{protocol}://{sel_host}:{port_to_use}"
+            guessed = f"{protocol}://{sel_host}" if port_to_use in [80, 443] else f"{protocol}://{sel_host}:{port_to_use}"
         else:
-            st.warning("⚠️ Nmap nu a gasit porturi web standard. Introdu URL-ul manual.")
-            base_url = st.text_input("URL Web Manual:", value=f"http://{sel_host}")
+            st.warning("⚠️ Nmap nu a gasit porturi web standard. Verifica URL-ul de mai jos.")
+            guessed = f"http://{sel_host}"
+
+        base_url = st.text_input("🌐 URL tinta (editabil)", value=guessed,
+                                 help="Corecteaza protocolul/portul daca e nevoie, ex: https://host:4280",
+                                 key="web_base_url")
 
         # ----------------------------------------------------------
         # CAPTURA SESIUNE AUTENTIFICATA (motor intern, fara browser/proxy)
@@ -542,11 +548,19 @@ with tab_web:
                 st.error("Ai bifat SQLMap dar nu ai oferit o cale.")
 
             if run_vigolium:
-                with st.spinner(f"🧪 Vigolium ({vig_strategy}) scaneaza {base_url}..."):
-                    res_vig = VigoliumScanner().run(
-                        Target(input=base_url, type=list(TargetType)[0]),
-                        strategy=vig_strategy, auth=effective_auth)
-                    pipeline_results.extend(res_vig)
+                vig_scanner = VigoliumScanner()
+                if not vig_scanner.check_prerequisites():
+                    st.error("❌ Vigolium nu a fost gasit. Instaleaza-l si asigura-te ca `~/.local/bin` e in PATH "
+                             "(sau porneste aplicatia cu `./run.sh`).")
+                else:
+                    with st.spinner(f"🧪 Vigolium ({vig_strategy}) scaneaza {base_url}..."):
+                        res_vig = vig_scanner.run(
+                            Target(input=base_url, type=list(TargetType)[0]),
+                            strategy=vig_strategy, auth=effective_auth)
+                        pipeline_results.extend(res_vig)
+                    if not res_vig:
+                        st.warning("Vigolium nu a returnat constatari. Jurnal:")
+                        st.code("\n".join(vig_scanner.log[-8:]) or "(fara mesaje)", language="text")
 
             saved = 0
             for r in pipeline_results:
