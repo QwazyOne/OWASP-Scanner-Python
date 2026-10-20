@@ -5,6 +5,7 @@ import os
 import time
 import socket
 import shlex
+from datetime import datetime, timedelta
 
 from core.models import Target, TargetType, AuthConfig, AuthType
 from core.database import DatabaseManager
@@ -325,6 +326,43 @@ with tab_assets:
     st.header("🗂️ Active & Vulnerabilitati salvate")
     if not targets:
         st.info("Nicio tinta scanata inca. Porneste cu un scan Nmap in Tab 1.")
+
+    # --- Curatare in masa a tintelor vechi ---
+    if targets:
+        with st.expander("🧹 Curatare tinte vechi", expanded=False):
+            col_old, col_all = st.columns(2)
+            with col_old:
+                days = st.number_input(
+                    "Sterge tintele mai vechi de (zile)",
+                    min_value=1, max_value=3650, value=30, step=1, key="cleanup_days")
+                if st.button(f"🗑️ Sterge tinte mai vechi de {int(days)} zile",
+                             use_container_width=True, key="del_old"):
+                    cutoff = datetime.now() - timedelta(days=int(days))
+                    removed = 0
+                    for t in targets:
+                        ls = t.get("last_scanned")
+                        # Data lipsa sau invalida => tinta considerata veche
+                        is_old = True
+                        if ls:
+                            try:
+                                is_old = datetime.strptime(ls, "%Y-%m-%d %H:%M:%S") < cutoff
+                            except ValueError:
+                                is_old = True
+                        if is_old:
+                            db.delete_target(t['id'])
+                            removed += 1
+                    st.success(f"Am sters {removed} tinta/tinte mai vechi de {int(days)} zile.")
+                    st.rerun()
+            with col_all:
+                st.caption("Sterge definitiv TOATE tintele si datele lor (porturi, vulns, sesiuni).")
+                confirm_all = st.checkbox("Confirm stergerea tuturor", key="confirm_all")
+                if st.button("💥 Sterge TOATE tintele", type="primary",
+                             disabled=not confirm_all, use_container_width=True, key="del_all"):
+                    for t in targets:
+                        db.delete_target(t['id'])
+                    st.success("Toate tintele au fost sterse.")
+                    st.rerun()
+
     for t in targets:
         v = db.get_vulnerabilities_for_target(t['id'])
         with st.expander(f"📌 {t['host']}  —  {len(v)} vulnerabilitati  (ultima scanare: {t['last_scanned']})"):
