@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Advanced VMS
+Comment=Vulnerability Management Framework (Nmap, Nikto, SQLMap, Metasploit)
+Exec=bash -c "cd '/home/qwazy-b/Code projects/OWASP-Scanner-Python' && ./run.sh; exec bash"
+Icon=security-high
+Terminal=true
+Categories=Security;Network;
